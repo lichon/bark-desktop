@@ -1,0 +1,10 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Grouped",
+      "body": "thread fallback"
+    },
+    "thread-id": "ops"
+  },
+  "id": "group-1"
+}

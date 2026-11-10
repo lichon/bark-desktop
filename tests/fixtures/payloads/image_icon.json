@@ -1,0 +1,10 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Chart",
+      "body": "daily revenue"
+    }
+  },
+  "icon": "https://example.com/chart.png",
+  "id": "img-1"
+}

@@ -1,0 +1,29 @@
+# Portable runtime data — never commit a user's identity or history.
+data/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build artefacts
+.pi
+.specify
+build/
+dist/
+*.spec
+*.zip
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp

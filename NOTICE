@@ -1,0 +1,55 @@
+NOTICE — third-party components
+===============================
+
+Bark Desktop Client bundles or depends on the following third-party projects.
+This file must be shipped with every binary distribution.
+
+pypush 2.0.2 — https://github.com/beeper/pypush
+  License: Server Side Public License v1 (SSPL-1.0)
+  Used for: anonymous Apple device activation and the APNs courier client.
+  IMPORTANT: the SSPL requires that anyone who offers the combined work as a
+  service make the corresponding source available. This repository's own source
+  is public; ship this dependency unmodified together with its license text.
+  pypush is explicitly unstable until 3.0.0; the version is pinned and isolated
+  behind bark_pc/push/pypush_client.py.
+
+pystray 0.19.5 — https://github.com/moses-palmer/pystray
+  License: GNU Lesser General Public License v3 (LGPL-3.0)
+  Used for: the system tray icon and menu.
+
+Pillow — https://python-pillow.org
+  License: Historical Permission Notice and Disclaimer (HPND)
+  Used for: thumbnails, tray/toast images, and the image viewer.
+
+windows-toasts 1.3.1 — https://github.com/DatGuy1/Windows-Toasts
+  License: MIT
+  Used for: native Windows toast notifications, including hero images.
+
+winrt-runtime / winrt-Windows.* — https://github.com/microsoft/pywinrt
+  License: MIT
+  Used by windows-toasts to reach the WinRT notification APIs.
+
+segno — https://github.com/heuer/segno
+  License: BSD 3-Clause
+  Used for: QR code rendering in the setup wizard.
+
+httpx — https://www.python-httpx.org
+  License: BSD 3-Clause
+  Used for: Bark server HTTP calls and image fetching.
+
+anyio — https://anyio.readthedocs.io
+  License: MIT
+  Used for: the receiver's async task group and the pypush event loop.
+
+cryptography — https://cryptography.io
+  License: Apache-2.0 OR BSD-3-Clause
+  Used for: loading the activation certificate/private key.
+
+Python — https://www.python.org
+  License: PSF License Agreement
+  Bundled by PyInstaller in the portable build.
+
+PyInstaller — https://pyinstaller.org
+  License: GPL-2.0 with a special exception permitting distribution of bundled
+  applications.
+  Used only to produce the portable build.

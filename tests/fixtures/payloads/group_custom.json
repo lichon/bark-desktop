@@ -1,0 +1,11 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Grouped",
+      "body": "custom wins"
+    },
+    "thread-id": "thread-value"
+  },
+  "group": "custom-value",
+  "id": "group-2"
+}

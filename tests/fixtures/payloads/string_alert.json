@@ -1,0 +1,6 @@
+{
+  "aps": {
+    "alert": "bare string body"
+  },
+  "id": "str-1"
+}

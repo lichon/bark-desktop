@@ -1,0 +1,10 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Deploy done",
+      "body": "second delivery"
+    }
+  },
+  "group": "ops",
+  "id": "text-1"
+}

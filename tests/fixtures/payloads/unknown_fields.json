@@ -1,0 +1,15 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Unknown fields",
+      "body": "still delivered"
+    }
+  },
+  "autoCopy": true,
+  "ttl": 3600,
+  "nested": {
+    "a": 1
+  },
+  "weird": "x",
+  "id": "unk-1"
+}

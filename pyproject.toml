@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bark-pc"
+version = "0.1.0"
+description = "Tray-first Windows desktop client that receives Bark push notifications"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Bark Desktop Client contributors" }]
+keywords = ["bark", "push", "notifications", "windows", "tray"]
+
+dependencies = [
+    "pypush==2.0.2",
+    "Pillow>=10.0",
+    "pystray>=0.19.5",
+    "windows-toasts>=1.3.1; sys_platform == 'win32'",
+    "segno>=1.5",
+    "httpx>=0.27",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-anyio>=0.0.0",
+    "anyio>=4.0",
+    "ruff>=0.6",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+bark-desktop = "bark_pc.__main__:main"
+
+[tool.setuptools]
+packages = [
+    "bark_pc",
+    "bark_pc.core",
+    "bark_pc.push",
+    "bark_pc.bark",
+    "bark_pc.images",
+    "bark_pc.platform",
+    "bark_pc.platform.windows",
+    "bark_pc.tts",
+    "bark_pc.ui",
+    "bark_pc.tools",
+]
+
+[tool.setuptools.package-data]
+bark_pc = ["assets/icons/*.png", "assets/icons/*.ico"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "windows_only: test only meaningful on Windows",
+    "slow: long-running test",
+]

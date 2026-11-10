@@ -1,0 +1,10 @@
+{
+  "aps": {
+    "alert": {
+      "title": "Non-http icon",
+      "body": "ignored"
+    }
+  },
+  "icon": "ftp://example.com/a.png",
+  "id": "icon-1"
+}

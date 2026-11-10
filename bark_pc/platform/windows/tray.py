@@ -161,6 +161,7 @@ class TrayController:
             pystray.Menu.SEPARATOR,
             item("Settings…", lambda: self._call("settings")),
             item("Setup…", lambda: self._call("setup")),
+            item("Show log folder", lambda: self._call("show_log_folder")),
             pystray.Menu.SEPARATOR,
             item("Quit", lambda: self._call("quit")),
         )

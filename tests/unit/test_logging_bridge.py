@@ -16,6 +16,7 @@ from bark_pc.core.logging import (
 )
 
 PYPUSH_LIFECYCLE = "C:/venv/Lib/site-packages/pypush/apns/lifecycle.py"
+PYPUSH_PROTOCOL = "C:/venv/Lib/site-packages/pypush/apns/_protocol.py"
 APP_LIFECYCLE = "C:/repos/bark-pc/bark_pc/push/supervisor.py"
 
 
@@ -38,11 +39,13 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def module_record(message: str, *, pathname: str, module: str) -> logging.LogRecord:
-    """A record as module-level `logging.debug(...)` creates it (name 'root')."""
+def module_record(
+    message: str, *, pathname: str, module: str, level: int = logging.DEBUG
+) -> logging.LogRecord:
+    """A record as a module-level `logging.<level>(...)` call creates it."""
     return logging.LogRecord(
         name="root",
-        level=logging.DEBUG,
+        level=level,
         pathname=pathname,
         lineno=1,
         msg=message,
@@ -104,14 +107,83 @@ def test_info_level_does_not_capture_module_level_debug_logs(tmp_path):
     assert "Sending keepalive" not in read(log_path)
 
 
-def test_switching_back_to_info_detaches_the_root_forwarder(tmp_path):
+def test_switching_back_to_info_keeps_the_forwarder_for_redaction(tmp_path):
     log_path = tmp_path / "logs" / "app.log"
     build_logger(log_path, level="debug")
     build_logger(log_path, level="info")
 
     root = logging.getLogger()
-    assert not any(getattr(h, "_bark_library_bridge", False) for h in root.handlers)
-    assert root.level == logging.WARNING
+    forwarders = [h for h in root.handlers if getattr(h, "_bark_library_bridge", False)]
+    assert len(forwarders) == 1
+    assert root.level == logging.INFO
+    assert not root.isEnabledFor(logging.DEBUG)
+
+
+def test_info_level_warnings_from_pypush_reach_the_redacted_log(tmp_path):
+    log_path = tmp_path / "logs" / "app.log"
+    build_logger(log_path, level="info")
+
+    # A raw stdout handler would leak the notification body; the forwarder must
+    # hand root records to the app handler instead.
+    logging.warning("courier said %s", "something odd")
+
+    content = read(log_path)
+    assert "courier said something odd" in content
+    assert "root:" in content
+    assert "WARNING:root:" not in content
+
+
+def test_root_records_never_trigger_basicConfig(tmp_path):
+    build_logger(tmp_path / "app.log", level="info")
+    root = logging.getLogger()
+    before = list(root.handlers)
+
+    logging.warning("library warning")
+
+    assert root.handlers == before
+
+
+def test_unknown_sendmessage_field_warning_is_dropped_at_info(tmp_path):
+    log_path = tmp_path / "logs" / "app.log"
+    build_logger(log_path, level="info")
+
+    logging.getLogger().handle(
+        module_record(
+            "Unexpected field with packet ID 24 in packet "
+            "Packet(id=<Type.SendMessage: 10>, fields=[Packet.Field(id=3, "
+            "value=b'{\"aps\":{\"alert\":\"secret body\"}}')])",
+            pathname=PYPUSH_PROTOCOL,
+            module="_protocol",
+            level=logging.WARNING,
+        )
+    )
+
+    content = read(log_path)
+    assert "Unexpected field" not in content
+    assert "secret body" not in content
+
+
+def test_unknown_sendmessage_field_warning_becomes_a_body_free_debug_line(tmp_path):
+    log_path = tmp_path / "logs" / "app.log"
+    build_logger(log_path, level="debug")
+
+    logging.getLogger().handle(
+        module_record(
+            "Unexpected field with packet ID 24 in packet "
+            "Packet(id=<Type.SendMessage: 10>, fields=[Packet.Field(id=3, "
+            "value=b'{\"aps\":{\"alert\":\"secret body\"}}')])",
+            pathname=PYPUSH_PROTOCOL,
+            module="_protocol",
+            level=logging.WARNING,
+        )
+    )
+
+    content = read(log_path)
+    assert "DEBUG" in content
+    assert "pypush._protocol:" in content
+    assert "field 24" in content
+    assert "secret body" not in content
+    assert "Packet.Field" not in content
 
 
 def test_rebuilding_the_logger_keeps_one_root_forwarder(tmp_path):

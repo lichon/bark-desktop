@@ -27,6 +27,9 @@ class SetupResult:
     server_url: str = ""
     device_key: str = ""
     push_url: str = ""
+    supabase_enabled: bool = False
+    supabase_url: str = ""
+    supabase_room: str = ""
     error: str | None = None
 
 
@@ -39,6 +42,11 @@ class SetupWizard:
         *,
         controller,
         current_server: str = "",
+        current_topic: str = "",
+        current_supabase_enabled: bool = False,
+        current_supabase_url: str = "",
+        current_supabase_key: str = "",
+        current_supabase_topic: str = "",
         on_finished=None,
         embedded: bool = False,
     ):
@@ -46,18 +54,33 @@ class SetupWizard:
         self.on_finished = on_finished
         self.window = tk.Toplevel(master)
         self.window.title("Bark Desktop Client — Setup")
-        self.window.geometry("640x520")
+        self.window.geometry("680x620")
         self.window.resizable(False, False)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.result: SetupResult | None = None
         self._busy = False
         self._qr_photo = None
-        self._build(current_server)
+        self._build(
+            current_server,
+            current_topic,
+            current_supabase_enabled,
+            current_supabase_url,
+            current_supabase_key,
+            current_supabase_topic,
+        )
 
     # -- layout ------------------------------------------------------------ #
-    def _build(self, current_server: str) -> None:
+    def _build(
+        self,
+        current_server: str,
+        current_topic: str,
+        current_supabase_enabled: bool,
+        current_supabase_url: str,
+        current_supabase_key: str,
+        current_supabase_topic: str,
+    ) -> None:
         self.header = ttk.Label(
-            self.window, text="Step 1 of 3 — Choose your server", style="Title.TLabel"
+            self.window, text="Step 1 of 3 — Choose your Bark server", style="Title.TLabel"
         )
         self.header.pack(anchor="w", padx=16, pady=(14, 4))
         self.body = ttk.Frame(self.window, padding=(16, 8))
@@ -67,9 +90,10 @@ class SetupWizard:
         self.step1 = ttk.Frame(self.body)
         ttk.Label(
             self.step1,
-            text="Bark pushes are delivered through a Bark-compatible server.\n"
-            "Use the public server or the address of your self-hosted server.",
-            wraplength=560,
+            text="Bark pushes are delivered through a Bark-compatible server. "
+            "A Supabase Realtime room can be enabled as an additional transport; "
+            "both connections then run at the same time.",
+            wraplength=600,
         ).pack(anchor="w", pady=(0, 10))
         self.server_choice = tk.StringVar(value="public")
         ttk.Radiobutton(
@@ -86,8 +110,39 @@ class SetupWizard:
             variable=self.server_choice,
             command=self._toggle_custom,
         ).pack(anchor="w", pady=(0, 6))
-        self.server_entry = ttk.Entry(self.step1, width=52)
+        self.server_entry = ttk.Entry(self.step1, width=56)
         self.server_entry.pack(anchor="w", padx=(22, 0), pady=(0, 10))
+
+        self.supabase_frame = ttk.LabelFrame(
+            self.step1, text="Supabase Realtime (optional)", padding=(10, 6)
+        )
+        self.supabase_enabled_var = tk.BooleanVar(value=bool(current_supabase_enabled))
+        ttk.Checkbutton(
+            self.supabase_frame,
+            text="Also receive broadcasts from a Supabase Realtime room",
+            variable=self.supabase_enabled_var,
+            command=self._toggle_supabase_fields,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(self.supabase_frame, text="Project address").grid(
+            row=1, column=0, sticky="w"
+        )
+        self.supabase_url_entry = ttk.Entry(self.supabase_frame, width=42)
+        self.supabase_url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(self.supabase_frame, text="Auth key").grid(
+            row=2, column=0, sticky="w", pady=(4, 0)
+        )
+        self.supabase_key_entry = ttk.Entry(self.supabase_frame, width=42, show="*")
+        self.supabase_key_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        ttk.Label(self.supabase_frame, text="Room name").grid(
+            row=3, column=0, sticky="w", pady=(4, 0)
+        )
+        self.room_entry = ttk.Entry(self.supabase_frame, width=42)
+        self.room_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        self.supabase_frame.columnconfigure(1, weight=1)
+        self.supabase_url_entry.insert(0, current_supabase_url or "sb://")
+        self.supabase_key_entry.insert(0, current_supabase_key or "")
+        self.room_entry.insert(0, current_supabase_topic or "bark")
+
         if current_server and current_server != PUBLIC_SERVER:
             self.server_choice.set("custom")
             self.server_entry.insert(0, current_server)
@@ -103,9 +158,10 @@ class SetupWizard:
 
         # Step 2
         self.step2 = ttk.Frame(self.body)
-        ttk.Label(self.step2, text="Setting up your device key", style="Subtitle.TLabel").pack(
-            anchor="w"
+        self.step2_title = ttk.Label(
+            self.step2, text="Setting up your device key", style="Subtitle.TLabel"
         )
+        self.step2_title.pack(anchor="w")
         self.progress_label = ttk.Label(self.step2, text="Starting…", wraplength=560)
         self.progress_label.pack(anchor="w", pady=(10, 4))
         self.progress = ttk.Progressbar(self.step2, mode="indeterminate", length=520)
@@ -133,9 +189,10 @@ class SetupWizard:
         copy_row = ttk.Frame(self.step3)
         copy_row.pack(anchor="w", pady=(4, 0))
         ttk.Button(copy_row, text="Copy URL", command=self._copy_url).pack(side="left")
-        ttk.Button(copy_row, text="Save QR as PNG", command=self._save_qr).pack(
-            side="left", padx=(8, 0)
+        self.save_qr_button = ttk.Button(
+            copy_row, text="Save QR as PNG", command=self._save_qr
         )
+        self.save_qr_button.pack(side="left", padx=(8, 0))
         ttk.Button(copy_row, text="Send test notification", command=self._self_test).pack(
             side="left", padx=(8, 0)
         )
@@ -148,7 +205,8 @@ class SetupWizard:
         )
 
         self._toggle_custom()
-        self._show(self.step1, "Step 1 of 3 — Choose your server")
+        self._toggle_supabase_fields()
+        self._show(self.step1, "Step 1 of 3 — Choose your Bark server")
 
     def _show(self, frame, header: str) -> None:
         for candidate in (self.step1, self.step2, self.step3):
@@ -157,34 +215,59 @@ class SetupWizard:
         self.header.configure(text=header)
 
     def _toggle_custom(self) -> None:
-        state = "normal" if self.server_choice.get() == "custom" else "disabled"
-        self.server_entry.configure(state=state)
-        if self.server_choice.get() == "public":
+        choice = self.server_choice.get()
+        state = "normal" if choice == "custom" else "disabled"
+        # Edit the entry while it is enabled; a disabled ttk.Entry ignores
+        # programmatic insert/delete on some Tk versions.
+        self.server_entry.configure(state="normal")
+        if choice == "public":
             self.server_entry.delete(0, "end")
             self.server_entry.insert(0, PUBLIC_SERVER)
+        self.server_entry.configure(state=state)
+
+    def _toggle_supabase_fields(self) -> None:
+        enabled = bool(self.supabase_enabled_var.get())
+        state = "normal" if enabled else "disabled"
+        for entry in (self.supabase_url_entry, self.supabase_key_entry, self.room_entry):
+            entry.configure(state=state)
+        if enabled:
+            if not self.supabase_frame.winfo_manager():
+                self.supabase_frame.pack(
+                    anchor="w", fill="x", pady=(2, 8), after=self.server_entry
+                )
+        else:
+            self.supabase_frame.pack_forget()
 
     # -- step 2 ------------------------------------------------------------ #
     def _selected_server(self) -> str:
         if self.server_choice.get() == "public":
             return PUBLIC_SERVER
-        return self.server_entry.get().strip() or PUBLIC_SERVER
+        return self.server_entry.get().strip()
 
     def _start_setup(self) -> None:
         if self._busy:
             return
         self._busy = True
+        server = self._selected_server()
+        supabase_enabled = bool(self.supabase_enabled_var.get())
+        self.step2_title.configure(text="Setting up your device key")
         self._show(self.step2, "Step 2 of 3 — Activating and registering")
         self.error_label.configure(text="")
         self.retry_button.pack_forget()
         self.progress.start(12)
-        server = self._selected_server()
+        setup_kwargs = {
+            "supabase_enabled": supabase_enabled,
+            "supabase_url": self.supabase_url_entry.get().strip(),
+            "supabase_key": self.supabase_key_entry.get().strip(),
+            "room_name": self.room_entry.get().strip() or None,
+        }
 
         def progress(message: str) -> None:
             self.window.after(0, lambda: self.progress_label.configure(text=message))
 
         def worker() -> None:
             try:
-                result = self.controller.run_setup(server, progress)
+                result = self.controller.run_setup(server, progress, **setup_kwargs)
             except Exception as exc:  # surfaced to the user, not raised into Tk
                 logger.info("setup failed: %s", exc)
                 logger.debug("setup failure details", exc_info=True)
@@ -211,7 +294,13 @@ class SetupWizard:
             return
         self.key_label.configure(text=f"Device key: {result.device_key}")
         self.server_label.configure(text=f"Server: {result.server_url}")
-        self.url_label.configure(text=f"Push URL: {result.push_url}")
+        supabase_line = "Supabase Realtime: off"
+        if result.supabase_enabled:
+            supabase_line = (
+                f"Supabase Realtime: {result.supabase_url} · room {result.supabase_room}"
+            )
+        self.url_label.configure(text=f"Push URL: {result.push_url}\n{supabase_line}")
+        self.save_qr_button.configure(state="normal")
         self._render_qr(result.push_url)
         self._show(self.step3, "Step 3 of 3 — Your push URL")
         if self.on_finished is not None:
@@ -224,12 +313,12 @@ class SetupWizard:
         if self._busy:
             return
         self.error_label.configure(text="")
-        self._show(self.step1, "Step 1 of 3 — Choose your server")
+        self._show(self.step1, "Step 1 of 3 — Choose your Bark server")
 
     # -- step 3 ------------------------------------------------------------ #
     def _render_qr(self, payload: str) -> None:
         if not payload:
-            self.qr_label.configure(text="")
+            self.qr_label.configure(image="", text="")
             return
         try:
             import segno
@@ -243,7 +332,7 @@ class SetupWizard:
                 image = image.convert("RGB")
                 image.thumbnail((QR_PIXELS, QR_PIXELS))
                 self._qr_photo = ImageTk.PhotoImage(image.copy())
-            self.qr_label.configure(image=self._qr_photo)
+            self.qr_label.configure(image=self._qr_photo, text="")
         except Exception as exc:  # pragma: no cover - QR/rendering failures
             logger.info("QR rendering failed: %s", exc)
             self.qr_label.configure(text="QR code unavailable; copy the URL instead.")
@@ -320,5 +409,20 @@ class SetupWizard:
         self.close()
 
 
-def setup_result_ok(server_url: str, device_key: str, push_url: str) -> SetupResult:
-    return SetupResult(ok=True, server_url=server_url, device_key=device_key, push_url=push_url)
+def setup_result_ok(
+    server_url: str,
+    device_key: str,
+    push_url: str,
+    supabase_enabled: bool = False,
+    supabase_url: str = "",
+    supabase_room: str = "",
+) -> SetupResult:
+    return SetupResult(
+        ok=True,
+        server_url=server_url,
+        device_key=device_key,
+        push_url=push_url,
+        supabase_enabled=supabase_enabled,
+        supabase_url=supabase_url,
+        supabase_room=supabase_room,
+    )

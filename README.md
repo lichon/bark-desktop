@@ -15,16 +15,23 @@ history, image previews, and recall (delete) support.
 1. Unpack `BarkDesktopClient.zip` anywhere you can write to (for example
    `%LOCALAPPDATA%\Programs\BarkDesktopClient`).
 2. Run `bark_pc.exe`. The setup wizard opens; the tray icon appears.
-3. Choose the server:
+3. Choose the Bark server:
    * **Public server** — `https://api.day.app` (default), or
    * **Self-hosted** — for example `http://127.0.0.1:8080`.
-4. The wizard activates the device and registers a key. No Apple ID, password or
-   2FA prompt appears at any point.
-5. Copy the displayed **push URL** (or scan the QR code) and use it as the push
-   target. Keep the URL private: anyone who has it can send you notifications.
+4. Optionally tick **Supabase Realtime** and enter the project address
+   (`sb://<project-ref>.supabase.co`), the project's anon/publishable key and a
+   room name. The app then connects to the Bark server **and** the Realtime
+   room at the same time; the room is an extra transport, not a replacement.
+5. The wizard activates the device and registers a key with the Bark server. No
+   Apple ID, password or 2FA prompt appears at any point.
+6. Copy the displayed **push URL** (or scan the QR code) and use it as the push
+   target. Keep it private: anyone who has it can send you notifications. If
+   Supabase Realtime is enabled, the displayed room name is what senders use
+   there.
 
-The wizard can also send a self-test push and reports two facts separately:
-whether the server accepted it, and whether it arrived on this device.
+The wizard can also send a self-test push through the Bark server and reports
+two facts separately: whether the server accepted it, and whether it arrived on
+this device. The optional Realtime room is not used for the self-test.
 
 ## Sending pushes
 
@@ -52,6 +59,75 @@ curl -s -X POST http://127.0.0.1:8080/push -H 'Content-Type: application/json' \
 
 With the public server, replace the host with `https://api.day.app`. Multiple
 keys can be comma-separated, exactly as with the iOS app.
+
+## Supabase Realtime rooms (optional, alongside a Bark server)
+
+The Bark server is always configured. Supabase Realtime is an optional second
+transport: enable it in **Setup** (or *Settings → Supabase Realtime*) and the app
+runs both receivers concurrently, so a push arrives whichever side it was sent
+to. Enter:
+
+| Field | Value |
+|-------|-------|
+| Project address | `sb://<project-ref>.supabase.co` (or `sb://https://<ref>.supabase.co`) |
+| Supabase auth key | the project's anon or publishable key (`sb_publishable_…`) |
+| Room name | the room to join, for example `alerts` |
+
+Turning the option off stops the Realtime connection but leaves the Bark link
+running. The project address, key and room are kept so re-enabling is one click.
+
+The client joins the same channel shape as the companion `use-supabase.ts` hook:
+`room:<room-name>:messages`. A frame is a `ChannelMessage` (the shape
+`newMessage` produces), and the text lives in `content`:
+
+```json
+{
+  "id": "…",
+  "type": "message",
+  "content": "build 412 is live",
+  "timestamp": "2026-01-01T00:00:00.000Z",
+  "sender": "Ana"
+}
+```
+
+When the client sends one, `content` is the notification body as a plain string:
+only the message text goes over the wire, never a push envelope. A string is
+always read as that body (it is not decoded as JSON). A sender that has a full
+Bark payload can put it in `content` as an object instead, and it is used
+verbatim:
+
+```json
+{
+  "aps": { "alert": { "title": "Deploy done", "body": "build 412 is live" } },
+  "group": "ops",
+  "id": "build-412"
+}
+```
+
+When a message's content has no title, the message `sender` is used as the
+notification title — so a sender that only sends its text and its name still
+shows a sensible title. When it has no `group`, the Realtime room name becomes
+the group (toasts and the history's *Group* line), so one room's messages stay
+together; an explicit `group` in the content always wins.
+
+The client authenticates the WebSocket with the key as the `apikey` query
+parameter, sends the Phoenix heartbeat, and reconnects with the same backoff as
+the APNs transport. Loopback projects (`sb://127.0.0.1:54321`) use plain `ws://`;
+hosted projects use `wss://`. *Check connection* verifies the project/key through
+Supabase's REST endpoint. *Test notification* / the wizard's self-test only
+pushes through the Bark server, never into the room, so one test never shows up
+twice. The history window's bottom compose bar broadcasts a one-line message
+into the room: its *Send* button is enabled only while the Realtime transport is
+connected, and Enter sends. The button wears the tray icon's colours: blue (the
+icon's online ring) while the room is joined, grey (the icon's offline ring) and
+disabled while it is not. The app's own receiver sees that broadcast too, but
+recognises it as its own message (the broadcast `sender` is the desktop): it is
+stored in the history **already read**, and no toast is shown and no speech is
+spoken for it. Messages from every other sender behave as usual.
+
+Nothing Apple-specific happens for the Realtime side: it reuses the device
+activation performed for the Bark server, and toggling it never re-registers
+that key. Turning it off does not affect Bark delivery.
 
 ## Tray and windows
 
@@ -115,9 +191,13 @@ Set `BARK_PC_DATA` to use a different data folder.
 
 ## Privacy
 
+* The Bark device key (in `bark.db`) and the Supabase auth key (in
+  `settings.json`) are credentials: anyone with them can send to your link or
+  room. Treat them like the push URL.
 * Notification content stays on this machine. The only outbound connections are
-  Apple's activation service, Apple's courier, the Bark server you chose, and the
-  image URLs contained in your own pushes.
+  Apple's activation service, Apple's courier, the Bark server you chose, the
+  Supabase project and its Realtime WebSocket when the optional room is enabled,
+  and the image URLs contained in your own pushes.
 * The activation identity
   (`%LOCALAPPDATA%\BarkDesktopClient\identity.bin`) is encrypted with Windows
   DPAPI. It cannot be read by another Windows account, even if the folder is

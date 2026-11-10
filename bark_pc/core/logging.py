@@ -21,7 +21,7 @@ _HEX_RUN = re.compile(r"\b[0-9a-fA-F]{64,}\b")
 _BASE64_BLOB = re.compile(r"(?:[A-Za-z0-9+/]{60,}={0,2})")
 # key=value style secrets.
 _KV_SECRET = re.compile(
-    r"(?i)\b(token|authorization|api[_-]?key|certificate|private[_-]?key|"
+    r"(?i)\b(token|authorization|api[_-]?key|supabase_key|certificate|private[_-]?key|"
     r"cert_pem|key_pem|device_token|base_token_hex)\b\s*[:=]\s*"
     r"(\"[^\"]*\"|'[^']*'|[^\s,)]+)"
 )
@@ -29,7 +29,8 @@ _KV_SECRET = re.compile(
 _PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DOTALL)
 # JSON-style secret fields.
 _JSON_SECRET = re.compile(
-    r'(?i)"(token|authorization|cert_pem|key_pem|device_token|base_token_hex|body)"'
+    r'(?i)"(token|authorization|supabase_key|cert_pem|key_pem|device_token|'
+    r'base_token_hex|body)"'
     r"\s*:\s*(\"[^\"]*\"|[^,}\s]+)"
 )
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
@@ -37,7 +38,30 @@ _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 # capability blobs stay readable; anything longer is notification material.
 _BYTES_REPR = re.compile(r"""b(?:"(?:[^"\\]|\\.){16,}"|'(?:[^'\\]|\\.){16,}')(?=[,)\]\s]|$)""")
 
-SENSITIVE_EXTRA_KEYS = frozenset({"body", "title", "subtitle", "raw_json"})
+SENSITIVE_EXTRA_KEYS = frozenset({"body", "title", "subtitle", "raw_json", "supabase_key"})
+
+# `pypush` 2.0.2 warns about every APNs `SendMessage` field its field table does
+# not know and embeds the whole packet in the message, payload bytes included.
+# Apple now sends field 24 (the notification UUID) on every push, so this fires
+# once per notification; the parser skips unknown fields and delivery is
+# unaffected.  The warning is therefore downgraded to a body-free debug line.
+_UPSTREAM_FIELD_NOISE = re.compile(r"^Unexpected field with packet ID (\d+) in packet ")
+
+
+def _upstream_field_noise_id(record: logging.LogRecord) -> str | None:
+    """Field ID when *record* is pypush's unknown-`SendMessage`-field warning."""
+    if record.name != "root":
+        return None
+    if not (record.pathname or "").replace("\\", "/").endswith(
+        "pypush/apns/_protocol.py"
+    ):
+        return None
+    try:
+        match = _UPSTREAM_FIELD_NOISE.match(record.getMessage())
+    except Exception:  # pragma: no cover - defensive, ``%`` args are unused there
+        return None
+    return match.group(1) if match else None
+
 
 # Third-party loggers bridged into the app log while debug level is active:
 # `httpx` reports every request/response, `httpcore` the connection details.
@@ -128,7 +152,7 @@ def build_logger(
         # connection detail from libraries we do not build clients for.
         for handler in list(logger.handlers):
             _bridge_loggers(handler)
-        _bridge_root_logger(logger)
+    _bridge_root_logger(logger)
     return logger
 
 
@@ -140,15 +164,32 @@ class _RootForwarder(logging.Handler):
     logging functions.  Those records arrive with the name ``root``; the
     forwarder renames the pypush ones and hands them to the app logger so the
     app's handlers and their redaction filter stay in charge.
+
+    Installed at every level, not only for debug runs: ``logging.warning()``
+    calls ``basicConfig()`` when the root logger has no handlers, which would
+    print an unformatted, unredacted copy of the record to stderr (whole APNs
+    packets and notification bodies included) and leave that handler behind.
     """
 
     def __init__(self, target: logging.Logger):
-        super().__init__(logging.DEBUG)
+        super().__init__(target.level)
         self.target = target
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.name != "root":
             return
+        field_id = _upstream_field_noise_id(record)
+        if field_id is not None:
+            # Drop it at info level; keep one short, body-free line in debug
+            # logs so a genuinely new protocol field is still noticeable.
+            if not self.target.isEnabledFor(logging.DEBUG):
+                return
+            record.msg = (
+                f"courier: SendMessage field {field_id} is not mapped by pypush (ignored)"
+            )
+            record.args = ()
+            record.levelno = logging.DEBUG
+            record.levelname = "DEBUG"
         pathname = (record.pathname or "").replace("\\", "/")
         if "pypush" in pathname:
             record.name = f"pypush.{record.module}"
@@ -185,13 +226,15 @@ def _bridge_loggers(handler: logging.Handler) -> None:
 
 
 def _bridge_root_logger(target: logging.Logger) -> None:
-    """Capture module-level logging calls (pypush's courier debug output)."""
+    """Capture module-level logging calls (pypush's courier output)."""
     root = logging.getLogger()
     forwarder = _RootForwarder(target)
     setattr(forwarder, _BRIDGE_MARK, True)
     setattr(forwarder, _PREVIOUS_ROOT_LEVEL, root.level)
     root.addHandler(forwarder)
-    root.setLevel(logging.DEBUG)
+    # Keep the root logger at the app level: debug records from libraries we do
+    # not bridge are not interesting, and ``logging.debug()`` must stay cheap.
+    root.setLevel(target.level)
 
 
 def _level_value(level: str) -> int:

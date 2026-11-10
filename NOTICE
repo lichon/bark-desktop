@@ -41,6 +41,10 @@ anyio — https://anyio.readthedocs.io
   License: MIT
   Used for: the receiver's async task group and the pypush event loop.
 
+websockets — https://github.com/python-websockets/websockets
+  License: BSD 3-Clause
+  Used for: the Supabase Realtime (`sb://`) WebSocket transport.
+
 cryptography — https://cryptography.io
   License: Apache-2.0 OR BSD-3-Clause
   Used for: loading the activation certificate/private key.

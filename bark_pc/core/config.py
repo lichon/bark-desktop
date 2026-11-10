@@ -29,6 +29,8 @@ APP_DATA_DIRNAME = "BarkDesktopClient"
 DEFAULT_SERVER_URL = "https://api.day.app"
 DEFAULT_PUSH_TOPIC = "me.fin.bark"
 SETTINGS_FILENAME = "settings.json"
+SUPABASE_SCHEME = "sb"
+MAX_SUPABASE_KEY_LENGTH = 4096
 
 LOG_LEVELS = ("debug", "info", "warning", "error")
 
@@ -218,6 +220,10 @@ class Settings:
     autostart_path: str | None = None
     launch_at_login_configured_at: int | None = None
     last_connected_at: int | None = None
+    supabase_enabled: bool = False
+    supabase_url: str = ""
+    supabase_key: str = ""
+    supabase_topic: str = "bark"
     log_level: str = "info"
     window_size: str | None = None
     warnings: list[str] = field(default_factory=list, repr=False, compare=False)
@@ -242,7 +248,31 @@ class Settings:
             raw = data[item.name]
             value = settings._validate(item.name, raw, logger)
             setattr(settings, item.name, value)
+        settings._migrate_legacy_supabase(logger)
         return settings
+
+    def _migrate_legacy_supabase(self, logger: logging.Logger | None) -> None:
+        """A pre-dual-transport `sb://` server address becomes the optional room.
+
+        Older builds selected either a Bark server *or* Supabase Realtime with
+        `server_url`.  Now the Bark server is always configured and Realtime is
+        its own opt-in setting, so move a legacy address across instead of
+        leaving the Bark side pointed at a WebSocket room.
+        """
+        if not is_supabase_url(self.server_url):
+            return
+        if not self.supabase_url:
+            self.supabase_url = self.server_url
+        if not self.supabase_topic or self.supabase_topic == "bark":
+            self.supabase_topic = self.push_topic or "bark"
+        self.supabase_enabled = True
+        self.server_url = DEFAULT_SERVER_URL
+        self.push_topic = DEFAULT_PUSH_TOPIC
+        if logger is not None:
+            logger.info(
+                "settings: moved the legacy %s link to the optional Supabase room",
+                self.supabase_url,
+            )
 
     # -- validation -------------------------------------------------------- #
     def _validate(self, name: str, raw, logger: logging.Logger | None):
@@ -271,6 +301,7 @@ class Settings:
                 "autostart_enabled",
                 "tts_enabled",
                 "tts_include_body",
+                "supabase_enabled",
             ):
                 if isinstance(raw, bool):
                     return raw
@@ -298,6 +329,22 @@ class Settings:
                 return text
             if name == "server_url":
                 return validate_server_url(str(raw))
+            if name == "supabase_url":
+                return validate_supabase_url(str(raw or ""))
+            if name == "supabase_topic":
+                text = str(raw or "").strip()
+                if not text:
+                    return "bark"
+                if len(text) > 155:
+                    raise ValueError("expected at most 155 characters")
+                return text
+            if name == "supabase_key":
+                text = str(raw or "").strip()
+                if len(text) > MAX_SUPABASE_KEY_LENGTH:
+                    raise ValueError(f"expected at most {MAX_SUPABASE_KEY_LENGTH} characters")
+                if any(character.isspace() for character in text):
+                    raise ValueError("must not contain whitespace")
+                return text
             if name == "push_topic":
                 text = str(raw).strip()
                 if not text or len(text) > 155:
@@ -323,11 +370,61 @@ def _int_in_range(raw, low: int, high: int, default: int, name: str, logger, hol
     return value
 
 
+def is_supabase_url(raw: str | None) -> bool:
+    """True for `sb://…` addresses (a Supabase Realtime project)."""
+    text = (raw or "").strip()
+    return bool(text) and text.lower().startswith(f"{SUPABASE_SCHEME}://")
+
+
+def supabase_base_url(raw: str) -> str:
+    """`sb://project.supabase.co` → the matching `https://` Supabase project URL.
+
+    Loopback development projects use plain HTTP (`supabase start` serves
+    `http://127.0.0.1:54321`), so the scheme follows the host.
+    """
+    normalized = validate_server_url(raw)
+    if not is_supabase_url(normalized):
+        raise ValueError("not a sb:// address")
+    parts = urlsplit(normalized)
+    host = parts.hostname or ""
+    scheme = "http" if _is_loopback_host(host) else "https"
+    return f"{scheme}://{parts.netloc}{parts.path}"
+
+
+def validate_supabase_url(raw: str) -> str:
+    """Canonicalize an optional Supabase project address (`""` stays empty).
+
+    Accepts `sb://project.supabase.co`, a bare `project.supabase.co`, or the
+    project's `https://` URL, which people often paste from the dashboard.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if not text.lower().startswith(f"{SUPABASE_SCHEME}://"):
+        if "://" in text:
+            parts = urlsplit(text)
+            text = f"{SUPABASE_SCHEME}://{parts.netloc}{parts.path}"
+        else:
+            text = f"{SUPABASE_SCHEME}://{text}"
+    return _validate_supabase_url(text)
+
+
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").strip("[]").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
+
+
 def validate_server_url(raw: str) -> str:
-    """Normalize a Bark server URL or raise ValueError explaining the problem."""
+    """Normalize a Bark server URL or raise ValueError explaining the problem.
+
+    `sb://` addresses are still tolerated for reading settings written by older
+    builds; `Settings` moves them to the optional Supabase fields on load.
+    """
     text = (raw or "").strip()
     if not text:
         raise ValueError("server address is empty")
+    if text.lower().startswith(f"{SUPABASE_SCHEME}://"):
+        return _validate_supabase_url(text)
     if "://" not in text:
         text = f"https://{text}"
     parts = urlsplit(text)
@@ -344,6 +441,34 @@ def validate_server_url(raw: str) -> str:
     if parts.port:
         netloc = f"{netloc}:{parts.port}"
     return f"{parts.scheme}://{netloc}{path}"
+
+
+def _validate_supabase_url(text: str) -> str:
+    """Canonicalize `sb://host[:port][/path]` (also tolerates `sb://https://…`)."""
+    remainder = text[len(f"{SUPABASE_SCHEME}://") :].strip()
+    if not remainder:
+        raise ValueError("Supabase address is empty")
+    if remainder.lower().startswith(("http://", "https://")):
+        # People paste the project URL after the prefix; accept it as-is.
+        inner = urlsplit(remainder)
+    else:
+        inner = urlsplit(f"//{remainder}")
+    if inner.username or inner.password:
+        raise ValueError("Supabase address must not contain credentials")
+    if inner.query or inner.fragment:
+        raise ValueError("Supabase address must not contain a query or fragment")
+    host = inner.hostname
+    if not host:
+        raise ValueError("Supabase address has no host")
+    try:
+        port = inner.port
+    except ValueError as exc:
+        raise ValueError(f"Supabase address has an invalid port: {exc}") from exc
+    netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    if port:
+        netloc = f"{netloc}:{port}"
+    path = inner.path.rstrip("/")
+    return f"{SUPABASE_SCHEME}://{netloc}{path}"
 
 
 class SettingsStore:

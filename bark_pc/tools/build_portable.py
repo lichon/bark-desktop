@@ -40,7 +40,7 @@ HIDDEN_IMPORTS = [
     "PIL._tkinter_finder",
 ]
 
-COLLECT_ALL = ["pystray", "windows_toasts", "winrt", "pypush", "segno"]
+COLLECT_ALL = ["pystray", "windows_toasts", "winrt", "pypush", "segno", "websockets"]
 
 
 def build(zip_output: bool = True) -> Path:

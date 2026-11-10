@@ -200,3 +200,41 @@ def test_receiver_acks_every_message(monkeypatch, db, notifier):
     assert tokens == ["ab" * 32]
     assert connection.minted_topic == "me.fin.bark"
     assert db.count_notifications() == 2  # text + subtitle; malformed/delete add nothing
+
+
+# --------------------------------------------------------------------------- #
+# Own messages (Realtime compose bar): stored read, never toasted or spoken
+# --------------------------------------------------------------------------- #
+def test_own_message_is_stored_read_and_not_presented(db, notifier):
+    seen: list = []
+    ingestor = Ingestor(db, notifier=notifier, on_stored=seen.append)
+    raw = json.dumps(
+        {
+            "aps": {"alert": {"body": "hello from me"}},
+            "id": "own-1",
+            "bark_desktop_self": "1",
+        }
+    ).encode()
+
+    result = ingestor.handle_payload(raw, source_server=SERVER)
+
+    assert result.notification_id is not None
+    stored = db.find_by_remote_id(SERVER, "own-1")
+    assert stored is not None
+    assert stored.read_at is not None  # stored read: no unread badge
+    assert result.notification is not None and result.notification.from_self is True
+    assert db.unread_count() == 0
+    assert notifier.shown == []
+    assert [n.remote_id for n in seen] == ["own-1"]
+
+
+def test_from_self_argument_marks_a_payload_without_the_marker(db, notifier):
+    ingestor = Ingestor(db, notifier=notifier)
+    result = ingestor.handle_payload(
+        load_payload("text.json"), source_server=SERVER, from_self=True
+    )
+
+    stored = db.find_by_remote_id(SERVER, "text-1")
+    assert stored is not None and stored.read_at is not None
+    assert result.notification is not None and result.notification.from_self is True
+    assert notifier.shown == []

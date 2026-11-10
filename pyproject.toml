@@ -20,6 +20,7 @@ dependencies = [
     "segno>=1.5",
     "httpx>=0.27",
     "anyio>=4.0",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..core.db import Database, RecentPayloadFilter
-from ..core.models import Notification
+from ..core.models import Notification, now_ms
 from .payload import ParseOutcome, parse_payload
 
 logger = logging.getLogger("bark_pc.ingest")
@@ -48,7 +48,9 @@ class Ingestor:
         self.on_stored = on_stored
         self.on_deleted = on_deleted
 
-    def handle_payload(self, raw: bytes, *, source_server: str = "") -> IngestResult:
+    def handle_payload(
+        self, raw: bytes, *, source_server: str = "", from_self: bool = False
+    ) -> IngestResult:
         parsed = parse_payload(raw, source_server=source_server)
 
         if parsed.outcome == ParseOutcome.EMPTY:
@@ -70,6 +72,13 @@ class Ingestor:
         notification = parsed.notification
         if notification is None:  # pragma: no cover - defensive
             return IngestResult(outcome=ParseOutcome.MALFORMED, reason="no notification")
+
+        if from_self:
+            notification.from_self = True
+        if notification.from_self and notification.read_at is None:
+            # The user already saw this message when they sent it: no badge, no
+            # toast, no speech.  It still lands in the history, marked read.
+            notification.read_at = now_ms()
 
         if notification.remote_id is None and self.recent_filter.is_duplicate(
             source_server, parsed.raw
@@ -94,7 +103,7 @@ class Ingestor:
 
         if notification.image_url and self.on_image_url is not None:
             self._safe(self.on_image_url, notification)
-        if self.notifier is not None:
+        if self.notifier is not None and not notification.from_self:
             self._safe(self.notifier.show, notification)
         if self.on_stored is not None:
             self._safe(self.on_stored, notification)

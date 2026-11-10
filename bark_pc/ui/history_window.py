@@ -20,6 +20,12 @@ from ..core.models import (
     ImageState,
     Notification,
 )
+from .theme import (
+    SEND_OFFLINE_BG,
+    SEND_OFFLINE_FG,
+    SEND_ONLINE_ACTIVE_BG,
+    SEND_ONLINE_BG,
+)
 
 logger = logging.getLogger("bark_pc.ui.history")
 
@@ -96,7 +102,11 @@ class HistoryWindow:
     def _build(self) -> None:
         toolbar = ttk.Frame(self.window, padding=(8, 6))
         toolbar.pack(side="top", fill="x")
-        ttk.Button(toolbar, text="Clear all", command=self._clear_all).pack(side="left")
+        self.refresh_button = ttk.Button(toolbar, text="Refresh", command=self.refresh)
+        self.refresh_button.pack(side="left")
+        ttk.Button(toolbar, text="Clear all", command=self._clear_all).pack(
+            side="left", padx=(6, 0)
+        )
         self.status_label = ttk.Label(toolbar, text="", style="Muted.TLabel")
         self.status_label.pack(side="right")
 
@@ -125,6 +135,8 @@ class HistoryWindow:
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Configure>", self._on_tree_configure, add="+")
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        self.tree.bind("<ButtonRelease-1>", self._on_user_pick)
+        self.tree.bind("<Return>", self._on_user_pick)
         self.tree.bind("<Delete>", lambda _e: self._delete_selected())
         self.tree.bind("<Up>", lambda _e: self._navigate(-1))
         self.tree.bind("<Down>", lambda _e: self._navigate(1))
@@ -159,16 +171,43 @@ class HistoryWindow:
         actions = ttk.Frame(right)
         actions.pack(fill="x", pady=(6, 0))
         ttk.Button(actions, text="Copy content", command=self._copy).pack(side="left")
-        ttk.Button(actions, text="Delete", command=self._delete_selected).pack(
-            side="right", padx=(0, 6)
+        # Flush with the composer's Send button so both sit on the same right edge.
+        self.delete_button = ttk.Button(
+            actions, text="Delete", command=self._delete_selected
         )
+        self.delete_button.pack(side="right")
 
-        self.empty_label = ttk.Label(
-            self.window,
-            text="No notifications yet. Copy your device key from Settings and send a test push.",
-            style="Muted.TLabel",
-            anchor="center",
+        # Compose bar: send a message into the Supabase Realtime room from the
+        # UI.  The button stays disabled until the Realtime transport is active.
+        composer = ttk.Frame(self.window, padding=(8, 0, 8, 8))
+        composer.pack(side="bottom", fill="x")
+        # Single row grid: both cells stretch vertically so the one-line entry
+        # ends up exactly as tall as the Send button.
+        composer.columnconfigure(0, weight=1)
+        self.message_var = tk.StringVar()
+        self.message_entry = ttk.Entry(composer, textvariable=self.message_var)
+        self.message_entry.grid(row=0, column=0, sticky="nsew")
+        self.message_entry.bind("<Return>", self._on_composer_return)
+        self.message_entry.bind("<KP_Enter>", self._on_composer_return)
+        # A classic tk button, not ttk: the native Windows theme ignores a ttk
+        # button's background, and this button must carry the tray icon colour.
+        self.send_button = tk.Button(
+            composer,
+            text="Send",
+            command=self._send_message,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=14,
+            pady=3,
+            foreground="#ffffff",
+            background=SEND_OFFLINE_BG,
+            activeforeground="#ffffff",
+            activebackground=SEND_ONLINE_ACTIVE_BG,
+            disabledforeground=SEND_OFFLINE_FG,
         )
+        self.send_button.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        self.send_button.configure(state="disabled")
 
     # -- data -------------------------------------------------------------- #
     def refresh(self) -> None:
@@ -178,14 +217,16 @@ class HistoryWindow:
         self._offset = 0
         self._load_page()
         self._update_status()
-        self._update_empty_state()
 
     def _load_page(self, *, select_first: bool = True) -> None:
         rows = self.db.list_notifications(limit=PAGE_SIZE, offset=self._offset)
+        first_item: str | None = None
         for notification in rows:
             item = self._insert_row(notification)
-            if select_first and self._selected is None:
-                self.tree.selection_set(item)
+            if first_item is None:
+                first_item = item
+        if select_first and self._selected is None and first_item is not None:
+            self.tree.selection_set(first_item)
         self._offset += len(rows)
         if len(rows) == PAGE_SIZE:
             self.more_button.grid()
@@ -236,7 +277,7 @@ class HistoryWindow:
         if notice:
             text = f"{text} · {notice}" if text else notice
         self.status_label.configure(text=text)
-        self._update_empty_state()
+        self._update_send_state()
 
     def _status_text(self) -> str:
         """Connection state from the controller (falls back to *Starting*)."""
@@ -261,14 +302,58 @@ class HistoryWindow:
             logger.exception("toast_notice callback failed")
             return ""
 
-    def _update_empty_state(self) -> None:
-        if self.tree.get_children():
-            self.empty_label.pack_forget()
-        else:
-            self.empty_label.pack(fill="both", expand=True)
+    # -- compose bar ------------------------------------------------------- #
+    def _supabase_connected(self) -> bool:
+        getter = self.callbacks.get("supabase_connected")
+        if getter is None:
+            return False
+        try:
+            return bool(getter())
+        except Exception:  # pragma: no cover - callback isolation
+            logger.exception("supabase_connected callback failed")
+            return False
+
+    def _update_send_state(self) -> None:
+        """Enable Send only while the Realtime transport is connected.
+
+        The button wears the tray icon's online colour while the room is joined
+        and the icon's offline colour while it is not.
+        """
+        connected = self._supabase_connected()
+        self.send_button.configure(
+            state="normal" if connected else "disabled",
+            background=SEND_ONLINE_BG if connected else SEND_OFFLINE_BG,
+            activebackground=SEND_ONLINE_ACTIVE_BG if connected else SEND_OFFLINE_BG,
+            disabledforeground=SEND_OFFLINE_FG,
+        )
+
+    def _on_composer_return(self, _event=None) -> str:
+        self._send_message()
+        return "break"
+
+    def _send_message(self) -> None:
+        text = self.message_var.get().strip()
+        if not text or not self._supabase_connected():
+            return
+        callback = self.callbacks.get("on_send_message")
+        if callback is None:
+            return
+        try:
+            sent = callback(text)
+        except Exception:  # pragma: no cover - callback isolation
+            logger.exception("on_send_message callback failed")
+            return
+        if sent is not False:
+            self.message_var.set("")
+            self.message_entry.focus_set()
 
     # -- selection --------------------------------------------------------- #
     def _on_select(self, _event=None) -> None:
+        """Show the selected row; marking it read is the user's job.
+
+        `<<TreeviewSelect>>` also fires for selections the window makes itself
+        (refresh, delete, navigation), so it must never consume the unread flag.
+        """
         selection = self.tree.selection()
         if not selection:
             return
@@ -277,28 +362,40 @@ class HistoryWindow:
             return
         self._selected = notification
         self._render_detail(notification)
-        if notification.read_at is None and notification.id is not None:
-            self.db.mark_read(notification.id)
-            notification.read_at = 1
-            self.tree.set(
-                selection[0], "title", notification.display_title or "(no title)"
-            )
-            self.tree.item(selection[0], tags=())
-            callback = self.callbacks.get("on_read")
-            if callback:
-                callback(notification.id)
+
+    def _on_user_pick(self, _event=None) -> None:
+        """Click or Return on a row: that is an explicit read."""
+        selection = self.tree.selection()
+        if selection:
+            self._mark_read(selection[0])
+
+    def _mark_read(self, item: str) -> None:
+        notification = self._rows.get(item)
+        if notification is None or notification.id is None:
+            return
+        if notification.read_at is not None:
+            return
+        self.db.mark_read(notification.id)
+        notification.read_at = 1
+        self.tree.set(item, "title", notification.display_title or "(no title)")
+        self.tree.item(item, tags=())
+        callback = self.callbacks.get("on_read")
+        if callback:
+            callback(notification.id)
 
     def select_notification(self, notification_id: int) -> None:
         for item, notification in self._rows.items():
             if notification.id == notification_id:
                 self.tree.selection_set(item)
                 self.tree.see(item)
+                self._mark_read(item)
                 return
         notification = self.db.get_notification(notification_id)
         if notification is not None:
             item = self._insert_row(notification)
             self.tree.selection_set(item)
             self.tree.see(item)
+            self._mark_read(item)
 
     def _navigate(self, delta: int) -> None:
         items = list(self.tree.get_children())
@@ -309,6 +406,7 @@ class HistoryWindow:
         index = max(0, min(len(items) - 1, index + delta))
         self.tree.selection_set(items[index])
         self.tree.see(items[index])
+        self._mark_read(items[index])
 
     def _render_detail(self, notification: Notification) -> None:
         self.detail_title.configure(text=notification.display_title or "(no title)")
@@ -408,7 +506,6 @@ class HistoryWindow:
             items = list(self.tree.get_children())
         if not items:
             self._clear_detail()
-            self._update_empty_state()
             return
         target = items[max(0, min(len(items) - 1, index))]
         self.tree.selection_set(target)

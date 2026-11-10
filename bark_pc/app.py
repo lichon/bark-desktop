@@ -9,6 +9,7 @@ work always goes through `AppShell.post()`.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sys
 import threading
@@ -23,7 +24,16 @@ from .bark.links import ABANDON_NOTE, LinkManager
 from .bark.server_client import BarkServerClient, normalize_server_url
 from .core import models
 from .core.bus import BoundedEventQueue
-from .core.config import Paths, Settings, SettingsStore, migrate_legacy_data, resolve_paths
+from .core.config import (
+    DEFAULT_PUSH_TOPIC,
+    Paths,
+    Settings,
+    SettingsStore,
+    is_supabase_url,
+    migrate_legacy_data,
+    resolve_paths,
+    validate_supabase_url,
+)
 from .core.db import Database, RecentPayloadFilter
 from .core.errors import BarkError
 from .core.logging import build_logger, export_diagnostics
@@ -43,6 +53,7 @@ from .platform.windows.single_instance import SingleInstanceManager
 from .platform.windows.toast import WindowsToastNotifier
 from .platform.windows.tray import TrayController
 from .platform.windows.uri_scheme import WindowsUriHandler, parse_barkpc_uri
+from .push import supabase_realtime
 from .push.identity import IdentityManager
 from .push.ingest import Ingestor
 from .push.pypush_client import PypushReceiver
@@ -91,6 +102,7 @@ class BarkApp:
             receiver=PypushReceiver(),
         )
         self.links = LinkManager(self.db, push_topic=self.settings.push_topic)
+        self._migrate_legacy_supabase_link()
         self.image_store = ImageStore(
             self.db, self.paths.images_dir, cache_limit_mb=self.settings.image_cache_mb
         )
@@ -124,6 +136,10 @@ class BarkApp:
             on_deleted=self._on_notification_deleted,
         )
         self.supervisor: PushSupervisor | None = None
+        self.supabase_supervisor: PushSupervisor | None = None
+        # Combined tray status: one receiver per transport, both may run at once.
+        self._transport_status: dict[str, PushStatus] = {}
+        self._transport_reason: dict[str, str] = {}
 
         self.shell = None  # created by `run()` (needs the main thread)
         self.tray: TrayController | None = None
@@ -223,6 +239,36 @@ class BarkApp:
         self._maybe_offer_autostart_repair()
         self._refresh_status_summary()
 
+    def _migrate_legacy_supabase_link(self) -> None:
+        """Move a pre-dual-transport `sb://` link out of the Bark slot.
+
+        Older builds stored either transport in the single `bark_link` row.
+        The Bark link is now always a real Bark server, so a Realtime link is
+        preserved in settings (as the optional room) and the Bark slot is
+        cleared, which makes setup run again for the required Bark side.
+        """
+        changes: dict = {}
+        if is_supabase_url(self.settings.server_url):
+            changes["supabase_enabled"] = True
+            changes.setdefault("supabase_url", self.settings.server_url)
+            changes["server_url"] = "https://api.day.app"
+        link = self.db.get_link()
+        if link is not None and link.is_supabase:
+            changes.setdefault("supabase_enabled", True)
+            if not self.settings.supabase_url:
+                changes.setdefault("supabase_url", link.server_url)
+            if not self.settings.supabase_key:
+                changes.setdefault("supabase_key", link.device_key)
+            if not self.settings.supabase_topic or self.settings.supabase_topic == "bark":
+                changes.setdefault("supabase_topic", link.push_topic or "bark")
+            self.db.upsert_link(
+                models.BarkLink(server_url="", device_key="", state=LinkState.UNLINKED)
+            )
+            self.log.info("moved the legacy Supabase link to the optional Realtime room")
+        if changes:
+            self.settings_store.update(**changes)
+            self.settings = self.settings_store.settings
+
     def _maybe_offer_autostart_repair(self) -> None:
         if not self.settings.autostart_enabled:
             return
@@ -258,6 +304,7 @@ class BarkApp:
                 "copy_key": lambda: self._on_ui(self.copy_device_key),
                 "settings": lambda: self._on_ui(self.open_settings),
                 "setup": lambda: self._on_ui(self.open_setup),
+                "show_log_folder": lambda: self._on_ui(self.show_log_folder),
                 "quit": lambda: self._on_ui(self.request_quit),
             },
             summary=self._tray_summary,
@@ -276,6 +323,8 @@ class BarkApp:
     def _tray_summary(self) -> str:
         link = self.db.get_link()
         server = link.server_url if link and link.server_url else "not linked"
+        if self.settings.supabase_enabled and self.settings.supabase_url:
+            server = f"{server} + room {self.settings.supabase_topic or 'bark'}"
         unread = self.db.unread_count()
         status = self.tray.status.value if self.tray else "starting"
         summary = f"{APP_NAME}\n{server} · {status} · {unread} unread"
@@ -314,25 +363,65 @@ class BarkApp:
             self.tray.set_status(status, reason)
         self._refresh_status_summary()
 
-    def _on_status(self, status: PushStatus, reason: str | None) -> None:
+    def _on_status(self, status: PushStatus, reason: str | None, role: str = "bark") -> None:
         def apply() -> None:
-            mapping = {
-                PushStatus.CONNECTING: ConnectionStatus.CONNECTING,
-                PushStatus.ACTIVE: ConnectionStatus.ACTIVE,
-                PushStatus.DEGRADED: ConnectionStatus.DEGRADED,
-                PushStatus.INVALID: ConnectionStatus.INVALID,
-                PushStatus.STOPPED: ConnectionStatus.STARTING,
-            }
-            connection = mapping.get(status, ConnectionStatus.STARTING)
+            self._publish_status(role, status, reason)
             if status == PushStatus.ACTIVE:
                 self.settings_store.set_last_connected()
                 self.settings = self.settings_store.settings
-                self.identity.mark_active()
-            self._set_status(connection, reason)
+                if role == "bark":
+                    self.identity.mark_active()
             if status in (PushStatus.INVALID, PushStatus.DEGRADED):
-                self.log.info("receiver %s: %s", status.value, reason or "")
+                self.log.info("%s receiver %s: %s", role, status.value, reason or "")
 
         self._on_ui(apply)
+
+    def _publish_status(
+        self, role: str, status: PushStatus, reason: str | None = None
+    ) -> None:
+        """Record one transport's status and show the combined state in the tray."""
+        if status == PushStatus.STOPPED:
+            self._transport_status.pop(role, None)
+            self._transport_reason.pop(role, None)
+        else:
+            self._transport_status[role] = status
+            self._transport_reason[role] = reason or ""
+        combined = self._combined_status()
+        mapping = {
+            PushStatus.CONNECTING: ConnectionStatus.CONNECTING,
+            PushStatus.ACTIVE: ConnectionStatus.ACTIVE,
+            PushStatus.DEGRADED: ConnectionStatus.DEGRADED,
+            PushStatus.INVALID: ConnectionStatus.INVALID,
+            PushStatus.STOPPED: ConnectionStatus.STARTING,
+        }
+        combined_reason = None
+        if combined != PushStatus.ACTIVE:
+            combined_reason = next(
+                (text for text in self._transport_reason.values() if text), None
+            )
+        self._set_status(mapping.get(combined, ConnectionStatus.STARTING), combined_reason)
+
+    def _combined_status(self) -> PushStatus:
+        """One tray state for the transports that are supposed to run.
+
+        Both receivers run concurrently.  A working connection keeps delivery
+        going, but a second transport that needs action still surfaces as
+        `degraded` instead of being hidden by the healthy one.
+        """
+        statuses = list(self._transport_status.values())
+        if not statuses:
+            return PushStatus.STOPPED
+        if all(status == PushStatus.ACTIVE for status in statuses):
+            return PushStatus.ACTIVE
+        if all(status == PushStatus.INVALID for status in statuses):
+            return PushStatus.INVALID
+        if any(status == PushStatus.INVALID for status in statuses):
+            return PushStatus.DEGRADED
+        if any(status == PushStatus.CONNECTING for status in statuses):
+            return PushStatus.CONNECTING
+        if any(status == PushStatus.ACTIVE for status in statuses):
+            return PushStatus.ACTIVE
+        return PushStatus.DEGRADED
 
     def _on_close_to_tray(self) -> None:
         if self.tray is not None:
@@ -349,29 +438,84 @@ class BarkApp:
             self._on_ui(lambda: self.open_setup())
             return None
 
+    def _supabase_config(self) -> tuple[str, str, str] | None:
+        """`(server_url, auth_key, room)` for the optional Realtime transport."""
+        if not self.settings.supabase_enabled:
+            return None
+        server = (self.settings.supabase_url or "").strip()
+        key = (self.settings.supabase_key or "").strip()
+        room = (self.settings.supabase_topic or "").strip() or "bark"
+        if not server or not key:
+            return None
+        return server, key, room
+
     def start_receiver(self) -> None:
+        """Run the Bark receiver and, when enabled, the Realtime receiver too."""
+        self._start_bark_receiver()
+        self._start_supabase_receiver()
+
+    def _start_bark_receiver(self) -> None:
         if self.supervisor is not None and self.supervisor.is_running:
             return
         link = self.db.get_link()
-        topic = (link.push_topic if link else None) or self.settings.push_topic
+        if link is None or link.is_supabase or not link.device_key:
+            self.log.info("Bark receiver not started: no usable Bark link yet")
+            return
+        topic = link.push_topic or self.settings.push_topic or DEFAULT_PUSH_TOPIC
         self.supervisor = PushSupervisor(
             PypushReceiver(),
             material_getter=self._material,
             topic=topic,
-            on_message=self._on_payload,
-            on_status=self._on_status,
+            on_message=lambda raw: self._on_payload(raw, "bark"),
+            on_status=lambda status, reason: self._on_status(status, reason, "bark"),
             on_token=self.identity.update_token,
             on_invalidate_token=self.identity.invalidate_token,
             on_reactivate=self._reactivate_identity,
         )
         self.supervisor.start()
-        self.log.info("receiver started (topic %s)", topic)
+        self.log.info("Bark receiver started (topic %s)", topic)
+
+    def _start_supabase_receiver(self) -> None:
+        if self.supabase_supervisor is not None and self.supabase_supervisor.is_running:
+            return
+        if not self.settings.supabase_enabled:
+            return
+        config = self._supabase_config()
+        if config is None:
+            message = (
+                "Supabase Realtime is enabled but the project address or auth key is "
+                "missing (Settings → Supabase Realtime)."
+            )
+            self.log.warning("Supabase receiver not started: the project or key is missing")
+            self._publish_status("supabase", PushStatus.INVALID, message)
+            return
+        server, key, topic = config
+        try:
+            receiver = supabase_realtime.SupabaseRealtimeReceiver(
+                server_url=server, auth_key=key, room_name=topic
+            )
+        except ValueError as exc:
+            self.log.warning("Supabase receiver not started: %s", exc)
+            self._publish_status("supabase", PushStatus.INVALID, str(exc))
+            return
+        self.supabase_supervisor = PushSupervisor(
+            receiver,
+            material_getter=lambda: None,
+            topic=topic,
+            on_message=lambda raw: self._on_payload(raw, "supabase"),
+            on_status=lambda status, reason: self._on_status(status, reason, "supabase"),
+        )
+        self.supabase_supervisor.start()
+        self.log.info("Supabase receiver started (room %s)", topic)
 
     def stop_receiver(self, timeout: float = 2.0) -> None:
-        """Cancel the connection and wait briefly; the thread is a daemon."""
+        """Cancel both connections and wait briefly; the threads are daemons."""
         if self.supervisor is not None:
             self.supervisor.stop(timeout=timeout)
             self.supervisor = None
+        if self.supabase_supervisor is not None:
+            self.supabase_supervisor.stop(timeout=timeout)
+            self.supabase_supervisor = None
 
     async def _reactivate_identity(self) -> None:
         material = await self.identity.activate()
@@ -380,9 +524,9 @@ class BarkApp:
     # ------------------------------------------------------------------ #
     # Ingest (receiver thread → storage thread → UI thread)
     # ------------------------------------------------------------------ #
-    def _on_payload(self, raw: bytes) -> None:
-        """Called on the receiver thread: enqueue only, never block."""
-        self.events.put(("payload", raw))
+    def _on_payload(self, raw: bytes, role: str = "bark") -> None:
+        """Called on a receiver thread: enqueue only, never block."""
+        self.events.put(("payload", (raw, role)))
 
     def _start_ingest(self) -> None:
         if self._ingest_thread is not None:
@@ -400,13 +544,20 @@ class BarkApp:
                 continue
             try:
                 if kind == "payload":
-                    self._ingest_payload(payload)
+                    raw, role = payload
+                    self._ingest_payload(raw, role)
             except Exception:  # pragma: no cover - never kill the ingest thread
                 self.log.exception("ingest failed")
 
-    def _ingest_payload(self, raw: bytes) -> None:
-        link = self.db.get_link()
-        server = link.server_url if link and link.server_url else self.settings.server_url
+    def _ingest_payload(self, raw: bytes, role: str = "bark") -> None:
+        if role == "supabase":
+            config = self._supabase_config()
+            server = config[0] if config else self.settings.supabase_url
+        else:
+            link = self.db.get_link()
+            server = (link.server_url if link and link.server_url else "") or (
+                self.settings.server_url
+            )
         host = urlsplit(server).hostname or server
         try:
             self.ingestor.handle_payload(raw, source_server=host)
@@ -432,14 +583,17 @@ class BarkApp:
 
     def _present(self, notification: Notification) -> None:
         """UI thread: toast + speech + badge + history refresh."""
-        try:
-            if self.is_silenced():
-                self.log.debug("silenced: not showing a toast")
-            elif self.settings.toasts_enabled:
-                self.notifier.show(notification)
-        except Exception:  # pragma: no cover - toast failures must not break the app
-            self.log.exception("toast presentation failed")
-        self._speak(notification)
+        if notification.from_self:
+            self.log.debug("own message: stored as read, no toast or speech")
+        else:
+            try:
+                if self.is_silenced():
+                    self.log.debug("silenced: not showing a toast")
+                elif self.settings.toasts_enabled:
+                    self.notifier.show(notification)
+            except Exception:  # pragma: no cover - toast failures must not break the app
+                self.log.exception("toast presentation failed")
+            self._speak(notification)
         self._refresh_status_summary()
         window = self.history_window
         if window is not None:
@@ -483,6 +637,7 @@ class BarkApp:
             if (
                 entry is not None
                 and entry.state == ImageState.CACHED
+                and not notification.from_self
                 and self.settings.toasts_enabled
                 and not self.is_silenced()
                 and notification.received_at + 30_000 > models.now_ms()
@@ -523,7 +678,16 @@ class BarkApp:
     # ------------------------------------------------------------------ #
     # Setup flow (called from the wizard's worker thread)
     # ------------------------------------------------------------------ #
-    def run_setup(self, server_url: str, progress=None) -> SetupResult:
+    def run_setup(
+        self,
+        server_url: str,
+        progress=None,
+        *,
+        supabase_enabled: bool | None = None,
+        supabase_url: str | None = None,
+        supabase_key: str | None = None,
+        room_name: str | None = None,
+    ) -> SetupResult:
         report = progress or (lambda _message: None)
 
         def step(message: str) -> None:
@@ -531,25 +695,76 @@ class BarkApp:
             report(message)
 
         normalized = normalize_server_url(server_url)
+        if is_supabase_url(normalized):
+            raise BarkError(
+                "Enter a Bark server address (https://…). Supabase Realtime is optional: "
+                "tick the Realtime box to receive from a room as well."
+            )
         self.log.info("setup: starting (server=%s)", normalized)
+
+        # The optional Realtime transport is checked first so a bad project or
+        # key never leaves the required Bark side half-configured.
+        enable_supabase = (
+            self.settings.supabase_enabled if supabase_enabled is None else bool(supabase_enabled)
+        )
+        sb_url = ""
+        sb_key = ""
+        sb_room = ""
+        if enable_supabase:
+            try:
+                sb_url = validate_supabase_url(
+                    supabase_url if supabase_url is not None else self.settings.supabase_url
+                )
+            except ValueError as exc:
+                raise BarkError(f"The Supabase project address is invalid: {exc}") from exc
+            if not sb_url:
+                raise BarkError(
+                    "Enter the Supabase project address (sb://project.supabase.co)."
+                )
+            sb_key = (
+                supabase_key if supabase_key is not None else self.settings.supabase_key
+            ).strip()
+            if not sb_key:
+                raise BarkError(
+                    "Enter the Supabase auth key (the project's anon or publishable key)."
+                )
+            sb_room = (room_name or self.settings.supabase_topic or "bark").strip()
+            step("Checking the Supabase project…")
+            supabase_realtime.ping(sb_url, sb_key)
+
         step("Activating this device anonymously…")
         material = anyio.run(lambda: self.identity.activate())
         step("Connecting to the push service…")
         token = anyio.run(lambda: self.identity.fetch_base_token(material))
         step("Registering with the server…")
         link = self.links.register(normalized, token, push_topic=self.settings.push_topic)
-        self.settings_store.update(server_url=link.server_url)
+        changes: dict = {"server_url": link.server_url, "supabase_enabled": enable_supabase}
+        if enable_supabase:
+            changes.update(
+                supabase_url=sb_url,
+                supabase_key=sb_key,
+                supabase_topic=sb_room,
+            )
+        self.settings_store.update(**changes)
         self.settings = self.settings_store.settings
         self._register_uri_handler()
-        step("Starting the receiver…")
+        step("Starting the receivers…")
+        self.stop_receiver()
         self.start_receiver()
         self._on_ui(lambda: self._set_status(ConnectionStatus.CONNECTING))
-        self.log.info("setup: finished (server=%s)", link.server_url)
+        self.log.info(
+            "setup: finished (server=%s%s)",
+            link.server_url,
+            f", Supabase room {sb_room}" if enable_supabase else "",
+        )
         return SetupResult(
             ok=True,
             server_url=link.server_url,
             device_key=link.device_key,
             push_url=link.push_url,
+            supabase_enabled=enable_supabase,
+            supabase_url=sb_url if enable_supabase else "",
+            supabase_room=sb_room if enable_supabase else "",
         )
 
     def _register_uri_handler(self) -> None:
@@ -559,24 +774,38 @@ class BarkApp:
             self.log.warning("could not register the barkpc: URI scheme: %s", exc)
 
     def run_self_test(self) -> tuple[bool, bool, str]:
+        """Push a test notification through the Bark server only.
+
+        The optional Supabase Realtime room is deliberately left out: it is an
+        extra transport, not the server this device is linked to, and a room
+        broadcast would make one test look like two notifications.
+        """
         link = self.db.get_link()
-        if link is None or not link.device_key:
+        if link is None or not link.device_key or link.is_supabase:
             return False, False, "No device key yet. Complete setup first."
         remote_id = str(uuid.uuid4())
         waiter = threading.Event()
         with self._selftest_lock:
             self._selftest_waiters[remote_id] = waiter
-        client = BarkServerClient(link.server_url)
+        errors: list[str] = []
+        sent = False
         try:
-            client.push_test(link.device_key, message_id=remote_id)
+            client = BarkServerClient(link.server_url)
+            try:
+                client.push_test(link.device_key, message_id=remote_id)
+                sent = True
+            finally:
+                client.close()
         except BarkError as exc:
-            return False, False, str(exc)
-        finally:
-            client.close()
+            errors.append(f"Bark server: {exc}")
+        if not sent:
+            with self._selftest_lock:
+                self._selftest_waiters.pop(remote_id, None)
+            return False, False, "; ".join(errors)
         received = waiter.wait(SELF_TEST_TIMEOUT_S)
         with self._selftest_lock:
             self._selftest_waiters.pop(remote_id, None)
-        return True, received, ""
+        return True, received, "; ".join(errors)
 
     def _signal_selftest(self, remote_id: str | None) -> None:
         if not remote_id:
@@ -588,19 +817,35 @@ class BarkApp:
 
     def check_connection_async(self, done) -> None:
         def worker() -> None:
+            notes: list[str] = []
+            problems: list[str] = []
             link = self.db.get_link()
-            if link is None or not link.server_url:
-                done(False, "No server configured yet.")
-                return
-            client = BarkServerClient(link.server_url)
-            try:
-                client.ping()
-                host = urlsplit(link.server_url).hostname or link.server_url
-                done(True, f"Connected to {host}.")
-            except BarkError as exc:
-                done(False, str(exc))
-            finally:
-                client.close()
+            if link is not None and link.server_url and not link.is_supabase:
+                client = BarkServerClient(link.server_url)
+                try:
+                    client.ping()
+                    host = urlsplit(link.server_url).hostname or link.server_url
+                    notes.append(f"Bark: {host}")
+                except BarkError as exc:
+                    problems.append(f"Bark: {exc}")
+                finally:
+                    client.close()
+            else:
+                problems.append("Bark server: not configured")
+            if self.settings.supabase_enabled:
+                config = self._supabase_config()
+                if config is None:
+                    problems.append("Supabase Realtime: project address or auth key missing")
+                else:
+                    server, key, room = config
+                    try:
+                        supabase_realtime.ping(server, key)
+                        host = urlsplit(server).hostname or server
+                        notes.append(f"Supabase: {host} · room {room}")
+                    except BarkError as exc:
+                        problems.append(f"Supabase Realtime: {exc}")
+            message = "; ".join(notes + problems)
+            done(not problems, message)
 
         threading.Thread(target=worker, name="bark-check", daemon=True).start()
 
@@ -608,7 +853,14 @@ class BarkApp:
     # Settings application
     # ------------------------------------------------------------------ #
     def apply_settings(self, settings: Settings) -> None:
-        previous_topic = self.settings.push_topic
+        previous_connection = (
+            self.settings.server_url,
+            self.settings.push_topic,
+            self.settings.supabase_enabled,
+            self.settings.supabase_url,
+            self.settings.supabase_key,
+            self.settings.supabase_topic,
+        )
         previous_tts = (
             self.settings.tts_provider,
             self.settings.tts_rate,
@@ -631,10 +883,17 @@ class BarkApp:
                 self.log.exception("could not stop speaking")
         elif self.tray is not None:
             self.tray.set_silenced(False)
-            if self.supervisor is not None and self.supervisor.is_running:
+            if PushStatus.ACTIVE in self._transport_status.values():
                 self.tray.set_status(ConnectionStatus.ACTIVE)
-        if settings.push_topic != previous_topic:
-            self.log.info("push topic changed; restarting the receiver")
+        if previous_connection != (
+            settings.server_url,
+            settings.push_topic,
+            settings.supabase_enabled,
+            settings.supabase_url,
+            settings.supabase_key,
+            settings.supabase_topic,
+        ):
+            self.log.info("receiver settings changed; restarting the receivers")
             self.stop_receiver()
             self.start_receiver()
         self.image_store.evict()
@@ -846,6 +1105,8 @@ class BarkApp:
                     "on_read": lambda _id: self._refresh_status_summary(),
                     "on_clear_all": self.clear_history,
                     "connection_status": self._connection_status_text,
+                    "supabase_connected": self.is_supabase_connected,
+                    "on_send_message": self.send_supabase_message,
                     "on_copy_text": self.copy_text,
                     "on_retry_image": self.retry_image,
                     "toast_notice": self._toast_notice,
@@ -892,6 +1153,11 @@ class BarkApp:
             self.shell.root,
             controller=self,
             current_server=link.server_url if link else self.settings.server_url,
+            current_topic=(link.push_topic if link else "") or self.settings.push_topic,
+            current_supabase_enabled=self.settings.supabase_enabled,
+            current_supabase_url=self.settings.supabase_url,
+            current_supabase_key=self.settings.supabase_key,
+            current_supabase_topic=self.settings.supabase_topic,
             on_finished=self._on_setup_finished,
         )
         self.setup_wizard.show()
@@ -926,6 +1192,14 @@ class BarkApp:
             ),
         )
 
+    def show_log_folder(self) -> None:
+        """Open the logs folder so the current and rotated logs are reachable."""
+        target = self.paths.logs_dir
+        try:
+            os.startfile(str(target))  # noqa: S606 - Windows shell open
+        except Exception:
+            self.log.exception("could not open %s", target)
+
     def open_url(self, url: str | None) -> None:
         if not url:
             return
@@ -953,18 +1227,61 @@ class BarkApp:
                 self.tray.notify(APP_NAME, "Device key copied to the clipboard.")
 
     def send_test_notification(self) -> None:
+        """Send a test push through the Bark server (never the Realtime room)."""
         link = self.db.get_link()
-        if link is None or not link.device_key:
+        if link is None or not link.device_key or link.is_supabase:
+            self._notify_test_failure("No device key yet. Complete setup first.")
             return
-        client = BarkServerClient(link.server_url)
         try:
-            client.push_test(link.device_key)
+            client = BarkServerClient(link.server_url)
+            try:
+                client.push_test(link.device_key)
+            finally:
+                client.close()
         except BarkError as exc:
             self.log.warning("test push failed: %s", exc)
-            if self.tray is not None:
-                self.tray.notify("Test notification failed", str(exc))
-        finally:
-            client.close()
+            self._notify_test_failure(str(exc))
+
+    def _notify_test_failure(self, message: str, title: str = "Test notification failed") -> None:
+        if self.tray is not None:
+            self.tray.notify(title, message)
+
+    def is_supabase_connected(self) -> bool:
+        """True while the optional Realtime receiver is active.
+
+        The history window's Send button uses this to stay disabled until the
+        room is actually joined.
+        """
+        return self._transport_status.get("supabase") == PushStatus.ACTIVE
+
+    def send_supabase_message(self, text: str) -> bool:
+        """Broadcast a one-line message into the Realtime room (history UI)."""
+        text = (text or "").strip()
+        if not text:
+            return False
+        config = self._supabase_config()
+        if config is None:
+            self.log.warning("cannot send Realtime message: Supabase is not configured")
+            return False
+        # Publishing is network work; keep the UI thread free.
+        threading.Thread(
+            target=self._publish_supabase_message,
+            args=(config, text),
+            name="bark-supabase-send",
+            daemon=True,
+        ).start()
+        return True
+
+    def _publish_supabase_message(self, config: tuple[str, str, str], text: str) -> None:
+        server, key, room = config
+        payload = {"aps": {"alert": {"body": text}}}
+        try:
+            supabase_realtime.publish_bark_payload(server, key, room, payload)
+            self.log.info("Realtime message sent (room %s)", room)
+        except BarkError as exc:
+            self.log.warning("Realtime message failed: %s", exc)
+            message = str(exc)
+            self._on_ui(lambda: self._notify_test_failure(message, "Message not sent"))
 
     # ------------------------------------------------------------------ #
     # IPC + shutdown
@@ -1052,8 +1369,13 @@ class BarkApp:
     def _needs_setup(self) -> bool:
         meta = self.db.get_identity_meta()
         link = self.db.get_link()
+        link_ok = bool(
+            link
+            and not link.is_supabase
+            and link.is_usable
+            and link.device_key
+        )
         identity_ok = bool(meta and meta.state == models.DeviceState.ACTIVE)
-        link_ok = bool(link and link.is_usable and link.device_key)
         return not (identity_ok and link_ok)
 
     def _exe_path(self) -> Path:

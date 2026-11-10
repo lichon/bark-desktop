@@ -20,6 +20,9 @@ from ..core.models import Notification
 logger = logging.getLogger("bark_pc.payload")
 
 ENCRYPTED_PLACEHOLDER = "Encrypted message — not supported in this version"
+# Internal custom field the Supabase transport adds to broadcasts this desktop
+# sent itself.  Lower-case, like every custom field the server stringifies.
+SELF_FIELD = "bark_desktop_self"
 _MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\(\s*(https?://[^)\s]+)\s*\)")
 
 
@@ -68,7 +71,7 @@ def _as_text(value) -> str:
     return _stringify(value).strip()
 
 
-def _is_delete_flag(value) -> bool:
+def _is_flag(value) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -144,7 +147,7 @@ def parse_payload(
         remote_id = None
 
     # 1. Delete/recall push.
-    if _is_delete_flag(custom.get("delete")):
+    if _is_flag(custom.get("delete")):
         if not remote_id:
             return ParsedPush(
                 outcome=ParseOutcome.EMPTY,
@@ -162,6 +165,7 @@ def parse_payload(
     group = custom.get("group") or _as_text(aps.get("thread-id")) or None
     url = custom.get("url") or None
     level = custom.get("level") or None
+    from_self = _is_flag(custom.get(SELF_FIELD))
     raw_json = json.dumps(payload, ensure_ascii=False)
 
     # 2. Encrypted push: never decrypted, still counted as delivered.
@@ -178,6 +182,7 @@ def parse_payload(
             raw_json=raw_json,
             received_at=received_at or models.now_ms(),
             source_server=source_server,
+            from_self=from_self,
         )
         return ParsedPush(
             outcome=ParseOutcome.ENCRYPTED,
@@ -213,6 +218,7 @@ def parse_payload(
         raw_json=raw_json,
         received_at=received_at or models.now_ms(),
         source_server=source_server,
+        from_self=from_self,
     )
     return ParsedPush(
         outcome=ParseOutcome.MESSAGE,

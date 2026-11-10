@@ -5,7 +5,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from bark_pc.core.config import Settings, SettingsStore, validate_server_url
+from bark_pc.core.config import (
+    Settings,
+    SettingsStore,
+    validate_server_url,
+    validate_supabase_url,
+)
 
 
 def test_defaults_match_the_data_model(settings_store):
@@ -130,6 +135,46 @@ def test_server_url_normalization():
         except ValueError:
             continue
         raise AssertionError(f"expected {bad!r} to be rejected")
+
+
+def test_supabase_realtime_is_optional_and_off_by_default():
+    settings = Settings()
+    assert settings.supabase_enabled is False
+    assert settings.supabase_url == ""
+    assert settings.supabase_topic == "bark"
+
+
+def test_legacy_sb_server_moves_to_the_optional_room(portable_paths):
+    portable_paths.settings_path.write_text(
+        json.dumps(
+            {
+                "server_url": "sb://demo-project.supabase.co",
+                "supabase_key": "sb_publishable_example",
+                "push_topic": "alerts",
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SettingsStore(portable_paths).load()
+    assert settings.server_url == "https://api.day.app"
+    assert settings.push_topic == "me.fin.bark"
+    assert settings.supabase_enabled is True
+    assert settings.supabase_url == "sb://demo-project.supabase.co"
+    assert settings.supabase_key == "sb_publishable_example"
+    assert settings.supabase_topic == "alerts"
+
+
+def test_supabase_project_addresses_are_normalized():
+    assert validate_supabase_url("") == ""
+    assert validate_supabase_url("sb://demo-project.supabase.co") == (
+        "sb://demo-project.supabase.co"
+    )
+    assert validate_supabase_url("demo-project.supabase.co") == (
+        "sb://demo-project.supabase.co"
+    )
+    assert validate_supabase_url("https://demo-project.supabase.co/") == (
+        "sb://demo-project.supabase.co"
+    )
 
 
 def test_portable_paths_live_under_the_app_folder(portable_paths):

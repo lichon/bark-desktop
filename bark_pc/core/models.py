@@ -120,6 +120,10 @@ class BarkLink:
     abandoned_at: int | None = None
 
     @property
+    def is_supabase(self) -> bool:
+        return (self.server_url or "").strip().lower().startswith("sb://")
+
+    @property
     def push_url(self) -> str:
         if not self.server_url or not self.device_key:
             return ""
@@ -152,6 +156,9 @@ class Notification:
     read_at: int | None = None
     deleted_at: int | None = None
     source_server: str = ""
+    # True when this desktop sent the message itself (Realtime compose bar).
+    # Self messages are stored already read and never toasted or spoken.
+    from_self: bool = False
 
     @property
     def display_title(self) -> str:

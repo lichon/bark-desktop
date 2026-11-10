@@ -111,6 +111,8 @@ class PushSupervisor:
         self.sleep_step = max(0.01, float(sleep_step))
 
         self._stop_requested = threading.Event()
+        # APNs needs the activated device material; Supabase Realtime does not.
+        self._requires_material = bool(getattr(receiver, "needs_material", True))
         self._receiver_reports_activity = _accepts_keyword(
             getattr(receiver, "run", None), "on_activity"
         )
@@ -211,8 +213,8 @@ class PushSupervisor:
         attempts = 0
         while not self._stop_requested.is_set():
             attempts += 1
-            material = self._material()
-            if material is None:
+            material = self._material() if self._requires_material else None
+            if self._requires_material and material is None:
                 self._emit(PushStatus.INVALID, "Device identity missing")
                 return
 
@@ -256,7 +258,7 @@ class PushSupervisor:
 
         self._emit(PushStatus.STOPPED, None)
 
-    async def _run_connection(self, material: ActivationMaterial) -> None:
+    async def _run_connection(self, material: ActivationMaterial | None) -> None:
         failure: BaseException | None = None
         async with anyio.create_task_group() as task_group:
             self._cancel_scope = task_group.cancel_scope

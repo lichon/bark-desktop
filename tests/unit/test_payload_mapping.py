@@ -189,3 +189,21 @@ def test_toast_text_is_truncated_at_200_characters_per_line():
 def test_parsing_never_raises(raw: bytes):
     parsed = parse_payload(raw)
     assert parsed.outcome in tuple(ParseOutcome)
+
+
+def test_self_marker_marks_the_notification_as_sent_by_this_desktop():
+    parsed = parse_payload(
+        json.dumps(
+            {
+                "aps": {"alert": {"body": "hello"}},
+                "id": "own-1",
+                "bark_desktop_self": "1",
+            }
+        ).encode()
+    )
+    assert parsed.notification is not None
+    assert parsed.notification.from_self is True
+
+
+def test_payloads_without_the_self_marker_are_ordinary_notifications():
+    assert parse("text.json").notification.from_self is False

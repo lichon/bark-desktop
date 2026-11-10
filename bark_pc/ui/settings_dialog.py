@@ -7,7 +7,7 @@ import tkinter as tk
 from dataclasses import fields
 from tkinter import messagebox, ttk
 
-from ..core.config import Settings, validate_server_url
+from ..core.config import Settings, validate_server_url, validate_supabase_url
 from ..core.models import now_ms
 from ..tts import DEFAULT_TTS_PROVIDER, PROVIDER_LABEL_TO_NAME, PROVIDER_LABELS, TTS_PROVIDERS
 
@@ -55,7 +55,7 @@ class SettingsDialog:
         container = ttk.Frame(self.window, padding=14)
         container.pack(fill="both", expand=True)
 
-        ttk.Label(container, text="Server", style="Subtitle.TLabel").grid(
+        ttk.Label(container, text="Bark server", style="Subtitle.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         ttk.Label(container, text="Server address").grid(row=1, column=0, sticky="w")
@@ -63,50 +63,85 @@ class SettingsDialog:
         ttk.Entry(container, textvariable=self.server_var, width=42).grid(
             row=1, column=1, sticky="ew", pady=2
         )
-        ttk.Label(container, text="Push topic (advanced)").grid(row=2, column=0, sticky="w")
+        ttk.Label(container, text="Push topic").grid(
+            row=2, column=0, sticky="w"
+        )
         self.topic_var = tk.StringVar()
         ttk.Entry(container, textvariable=self.topic_var, width=42).grid(
             row=2, column=1, sticky="ew", pady=2
         )
 
-        ttk.Separator(container).grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
+        self.supabase_frame = ttk.LabelFrame(
+            container, text="Supabase Realtime (optional)", padding=(8, 4)
+        )
+        self.supabase_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2))
+        self.supabase_enabled_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            self.supabase_frame,
+            text="Also receive broadcasts from a Supabase Realtime room",
+            variable=self.supabase_enabled_var,
+            command=self._toggle_supabase_fields,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(self.supabase_frame, text="Project address").grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
+        self.supabase_url_var = tk.StringVar()
+        self.supabase_url_entry = ttk.Entry(
+            self.supabase_frame, textvariable=self.supabase_url_var, width=42
+        )
+        self.supabase_url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        ttk.Label(self.supabase_frame, text="Auth key").grid(row=2, column=0, sticky="w")
+        self.supabase_key_var = tk.StringVar()
+        self.supabase_key_entry = ttk.Entry(
+            self.supabase_frame, textvariable=self.supabase_key_var, width=42, show="*"
+        )
+        self.supabase_key_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(self.supabase_frame, text="Room name").grid(row=3, column=0, sticky="w")
+        self.supabase_topic_var = tk.StringVar()
+        self.supabase_topic_entry = ttk.Entry(
+            self.supabase_frame, textvariable=self.supabase_topic_var, width=42
+        )
+        self.supabase_topic_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0))
+        self.supabase_frame.columnconfigure(1, weight=1)
+
+        ttk.Separator(container).grid(row=4, column=0, columnspan=2, sticky="ew", pady=6)
 
         ttk.Label(container, text="History and images", style="Subtitle.TLabel").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(0, 4)
+            row=5, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Label(container, text="Keep at most (50–10 000)").grid(row=5, column=0, sticky="w")
+        ttk.Label(container, text="Keep at most (50–10 000)").grid(row=6, column=0, sticky="w")
         self.count_var = tk.StringVar()
         ttk.Spinbox(
             container, from_=50, to=10_000, increment=50, textvariable=self.count_var, width=10
-        ).grid(row=5, column=1, sticky="w", pady=2)
-        ttk.Label(container, text="Keep for at most (1–365 days)").grid(row=6, column=0, sticky="w")
+        ).grid(row=6, column=1, sticky="w", pady=2)
+        ttk.Label(container, text="Keep for at most (1–365 days)").grid(row=7, column=0, sticky="w")
         self.days_var = tk.StringVar()
         ttk.Spinbox(container, from_=1, to=365, textvariable=self.days_var, width=10).grid(
-            row=6, column=1, sticky="w", pady=2
+            row=7, column=1, sticky="w", pady=2
         )
-        ttk.Label(container, text="Image cache (20–2 000 MB)").grid(row=7, column=0, sticky="w")
+        ttk.Label(container, text="Image cache (20–2 000 MB)").grid(row=8, column=0, sticky="w")
         self.cache_var = tk.StringVar()
         ttk.Spinbox(
             container, from_=20, to=2_000, increment=20, textvariable=self.cache_var, width=10
-        ).grid(row=7, column=1, sticky="w", pady=2)
+        ).grid(row=8, column=1, sticky="w", pady=2)
 
-        ttk.Separator(container).grid(row=8, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(container).grid(row=9, column=0, columnspan=2, sticky="ew", pady=6)
 
         ttk.Label(container, text="Notifications", style="Subtitle.TLabel").grid(
-            row=9, column=0, columnspan=2, sticky="w", pady=(0, 4)
+            row=10, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         self.toasts_var = tk.BooleanVar()
         ttk.Checkbutton(
             container, text="Show Windows notifications", variable=self.toasts_var
-        ).grid(row=10, column=0, columnspan=2, sticky="w")
+        ).grid(row=11, column=0, columnspan=2, sticky="w")
         self.hide_preview_var = tk.BooleanVar()
         ttk.Checkbutton(
             container,
             text='Hide preview text (show "New notification" instead)',
             variable=self.hide_preview_var,
-        ).grid(row=11, column=0, columnspan=2, sticky="w")
+        ).grid(row=12, column=0, columnspan=2, sticky="w")
         ttk.Label(container, text="Silence notifications").grid(
-            row=12, column=0, sticky="w", pady=(2, 0)
+            row=13, column=0, sticky="w", pady=(2, 0)
         )
         self.silence_var = tk.StringVar(value="Off")
         ttk.Combobox(
@@ -115,21 +150,21 @@ class SettingsDialog:
             values=list(SILENCE_CHOICES),
             state="readonly",
             width=20,
-        ).grid(row=12, column=1, sticky="w", pady=(2, 0))
+        ).grid(row=13, column=1, sticky="w", pady=(2, 0))
         self.autostart_var = tk.BooleanVar()
         ttk.Checkbutton(
             container, text="Start with Windows (no admin rights)", variable=self.autostart_var
-        ).grid(row=13, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=14, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
-        ttk.Separator(container).grid(row=14, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(container).grid(row=15, column=0, columnspan=2, sticky="ew", pady=6)
 
         ttk.Label(container, text="Text-to-speech", style="Subtitle.TLabel").grid(
-            row=15, column=0, columnspan=2, sticky="w"
+            row=16, column=0, columnspan=2, sticky="w"
         )
         self.tts_var = tk.BooleanVar()
         ttk.Checkbutton(
             container, text="Speak notifications aloud", variable=self.tts_var
-        ).grid(row=16, column=0, sticky="w")
+        ).grid(row=17, column=0, sticky="w")
         self.tts_provider_var = tk.StringVar()
         ttk.Combobox(
             container,
@@ -137,13 +172,13 @@ class SettingsDialog:
             values=[PROVIDER_LABELS[name] for name in TTS_PROVIDERS],
             state="readonly",
             width=22,
-        ).grid(row=16, column=1, sticky="w")
+        ).grid(row=17, column=1, sticky="w")
         self.tts_body_var = tk.BooleanVar()
         ttk.Checkbutton(
             container, text="Read the message body too", variable=self.tts_body_var
-        ).grid(row=17, column=0, sticky="w")
+        ).grid(row=18, column=0, sticky="w")
         voice = ttk.Frame(container)
-        voice.grid(row=17, column=1, sticky="w")
+        voice.grid(row=18, column=1, sticky="w")
         self.tts_rate_var = tk.StringVar()
         ttk.Spinbox(voice, from_=-10, to=10, textvariable=self.tts_rate_var, width=4).pack(
             side="left"
@@ -159,10 +194,10 @@ class SettingsDialog:
             side="left", padx=(10, 0)
         )
 
-        ttk.Separator(container).grid(row=18, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(container).grid(row=19, column=0, columnspan=2, sticky="ew", pady=6)
 
         actions = ttk.Frame(container)
-        actions.grid(row=19, column=0, columnspan=2, sticky="ew")
+        actions.grid(row=20, column=0, columnspan=2, sticky="ew")
         ttk.Button(actions, text="Check connection", command=self._check_connection).pack(
             side="left"
         )
@@ -177,10 +212,10 @@ class SettingsDialog:
         )
 
         self.status_label = ttk.Label(container, text="", style="Muted.TLabel", wraplength=500)
-        self.status_label.grid(row=20, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.status_label.grid(row=21, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         buttons = ttk.Frame(container)
-        buttons.grid(row=21, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        buttons.grid(row=22, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ttk.Button(buttons, text="Cancel", command=self.close).pack(side="right")
         ttk.Button(buttons, text="Save", style="Accent.TButton", command=self._save).pack(
             side="right", padx=(0, 8)
@@ -192,6 +227,11 @@ class SettingsDialog:
         settings = self.settings
         self.server_var.set(settings.server_url)
         self.topic_var.set(settings.push_topic)
+        self.supabase_enabled_var.set(bool(settings.supabase_enabled))
+        self.supabase_url_var.set(settings.supabase_url)
+        self.supabase_key_var.set(settings.supabase_key)
+        self.supabase_topic_var.set(settings.supabase_topic or "bark")
+        self._toggle_supabase_fields()
         self.count_var.set(str(settings.history_retention_count))
         self.days_var.set(str(settings.history_retention_days))
         self.cache_var.set(str(settings.image_cache_mb))
@@ -209,14 +249,33 @@ class SettingsDialog:
         if settings.silence_until and settings.silence_until > now_ms():
             self.silence_var.set("For 1 hour")
 
+    def _toggle_supabase_fields(self) -> None:
+        state = "normal" if self.supabase_enabled_var.get() else "disabled"
+        for entry in (
+            self.supabase_url_entry,
+            self.supabase_key_entry,
+            self.supabase_topic_entry,
+        ):
+            entry.configure(state=state)
+
     def _candidate(self) -> dict:
         silence_choice = self.silence_var.get()
         silence_until = None
         if silence_choice in SILENCE_CHOICES and SILENCE_CHOICES[silence_choice]:
             silence_until = now_ms() + SILENCE_CHOICES[silence_choice]
+        server_url = validate_server_url(self.server_var.get())
+        if server_url.lower().startswith("sb://"):
+            raise ValueError(
+                "The Bark server must use http:// or https://; Supabase Realtime is "
+                "configured separately below."
+            )
         return {
-            "server_url": validate_server_url(self.server_var.get()),
+            "server_url": server_url,
             "push_topic": self.topic_var.get().strip(),
+            "supabase_enabled": bool(self.supabase_enabled_var.get()),
+            "supabase_url": validate_supabase_url(self.supabase_url_var.get()),
+            "supabase_key": self.supabase_key_var.get().strip(),
+            "supabase_topic": self.supabase_topic_var.get().strip() or "bark",
             "history_retention_count": int(self.count_var.get()),
             "history_retention_days": int(self.days_var.get()),
             "image_cache_mb": int(self.cache_var.get()),
@@ -241,6 +300,20 @@ class SettingsDialog:
             candidate = self._candidate()
         except ValueError as exc:
             messagebox.showerror("Invalid setting", str(exc), parent=self.window)
+            return
+        if candidate["supabase_enabled"] and not candidate["supabase_url"]:
+            messagebox.showerror(
+                "Invalid setting",
+                "Enter the Supabase project address (sb://project.supabase.co).",
+                parent=self.window,
+            )
+            return
+        if candidate["supabase_enabled"] and not candidate["supabase_key"]:
+            messagebox.showerror(
+                "Invalid setting",
+                "Supabase Realtime needs the auth key (anon/publishable key).",
+                parent=self.window,
+            )
             return
         validated = Settings.from_dict(
             {**self.settings.to_dict(), **candidate, "warnings": []}, None

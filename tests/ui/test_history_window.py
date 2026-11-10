@@ -8,6 +8,7 @@ import pytest
 
 from bark_pc.core.models import Notification
 from bark_pc.ui.history_window import HistoryWindow
+from bark_pc.ui.theme import SEND_OFFLINE_BG, SEND_ONLINE_BG
 
 
 @pytest.fixture
@@ -118,3 +119,131 @@ def test_delete_last_loaded_row_pulls_in_the_next_page(hidden_root, db, window, 
     assert window._selected is not None
     assert window._selected.id == oldest.id
     assert _titles(window) == [newest.title, oldest.title]
+
+
+def _compose_window(root, db, **callbacks):
+    created = HistoryWindow(root, db=db, callbacks=callbacks)
+    created.window.withdraw()
+    return created
+
+
+def test_send_button_is_disabled_until_realtime_is_connected(hidden_root, db):
+    state = {"connected": False}
+    window = _compose_window(
+        hidden_root,
+        db,
+        supabase_connected=lambda: state["connected"],
+        on_send_message=lambda _text: True,
+    )
+    try:
+        assert window.send_button.cget("state") == "disabled"
+        assert window.send_button.cget("background") == SEND_OFFLINE_BG
+
+        state["connected"] = True
+        window.refresh_status()
+        assert window.send_button.cget("state") == "normal"
+        assert window.send_button.cget("background") == SEND_ONLINE_BG
+
+        state["connected"] = False
+        window.refresh_status()
+        assert window.send_button.cget("state") == "disabled"
+        assert window.send_button.cget("background") == SEND_OFFLINE_BG
+    finally:
+        window.destroy()
+
+
+def test_send_button_colour_matches_the_tray_icon_states():
+    from bark_pc.core.models import ConnectionStatus
+    from bark_pc.platform.windows.tray import STATUS_COLORS
+
+    def rgb(color: str) -> tuple[int, int, int]:
+        return tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+
+    assert rgb(SEND_ONLINE_BG) == STATUS_COLORS[ConnectionStatus.ACTIVE][:3]
+    assert rgb(SEND_OFFLINE_BG) == STATUS_COLORS[ConnectionStatus.STARTING][:3]
+
+
+def test_composer_sends_on_enter_and_clears_the_box(hidden_root, db):
+    sent: list[str] = []
+    window = _compose_window(
+        hidden_root,
+        db,
+        supabase_connected=lambda: True,
+        on_send_message=lambda text: sent.append(text) or True,
+    )
+    try:
+        window.message_var.set("  hello room  ")
+        assert window._on_composer_return() == "break"
+        assert sent == ["hello room"]
+        assert window.message_var.get() == ""
+    finally:
+        window.destroy()
+
+
+def test_composer_ignores_sends_while_disconnected(hidden_root, db):
+    sent: list[str] = []
+    window = _compose_window(
+        hidden_root,
+        db,
+        supabase_connected=lambda: False,
+        on_send_message=lambda text: sent.append(text) or True,
+    )
+    try:
+        window.message_var.set("dropped")
+        window._send_message()
+        assert sent == []
+        assert window.message_var.get() == "dropped"
+    finally:
+        window.destroy()
+
+
+def test_composer_entry_is_as_tall_as_the_send_button(hidden_root, db):
+    window = _compose_window(
+        hidden_root,
+        db,
+        supabase_connected=lambda: True,
+        on_send_message=lambda _text: True,
+    )
+    try:
+        window.window.deiconify()
+        window.window.update()
+        assert window.message_entry.winfo_height() == window.send_button.winfo_height()
+    finally:
+        window.destroy()
+
+
+def test_delete_and_send_buttons_share_the_right_edge(hidden_root, db):
+    window = _compose_window(
+        hidden_root,
+        db,
+        supabase_connected=lambda: True,
+        on_send_message=lambda _text: True,
+    )
+    try:
+        window.window.deiconify()
+        window.window.update()
+        right = window.window.winfo_rootx() + window.window.winfo_width()
+        delete_gap = right - (
+            window.delete_button.winfo_rootx() + window.delete_button.winfo_width()
+        )
+        send_gap = right - (
+            window.send_button.winfo_rootx() + window.send_button.winfo_width()
+        )
+        assert delete_gap == send_gap
+    finally:
+        window.destroy()
+
+
+def test_composer_keeps_the_text_when_the_callback_refuses(hidden_root, db):
+    window = _compose_window(
+        hidden_root,
+        db,
+        supabase_connected=lambda: True,
+        on_send_message=lambda _text: False,
+    )
+    try:
+        window.message_var.set("retry me")
+        window._send_message()
+        assert window.message_var.get() == "retry me"
+    finally:
+        window.destroy()

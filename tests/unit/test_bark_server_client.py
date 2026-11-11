@@ -7,7 +7,11 @@ import json
 import httpx
 import pytest
 
-from bark_pc.bark.server_client import BarkServerClient, normalize_server_url
+from bark_pc.bark.server_client import (
+    BarkServerClient,
+    normalize_server_url,
+    push_to_url,
+)
 from bark_pc.core.errors import (
     BarkError,
     RegistrationRejected,
@@ -199,3 +203,69 @@ def test_normalize_rejects_unsupported_schemes():
         normalize_server_url("ftp://example.com")
     assert normalize_server_url("example.com/") == "https://example.com"
     assert normalize_server_url("http://127.0.0.1:8080/") == "http://127.0.0.1:8080"
+
+
+def test_push_to_url_posts_json_and_preserves_query_parameters():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"code": 200, "message": "success"})
+
+    push_to_url(
+        "http://127.0.0.1:8080/deviceKEY/?group=ops",
+        title="WORKSTATION",
+        body="hello from the PC",
+        group="bark-desktop",
+        message_id="fixed-id",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert captured["url"] == "http://127.0.0.1:8080/deviceKEY?group=ops"
+    assert captured["body"] == {
+        "title": "WORKSTATION",
+        "body": "hello from the PC",
+        "group": "bark-desktop",
+        "id": "fixed-id",
+    }
+
+
+def test_push_to_url_requires_a_configured_url():
+    with pytest.raises(RegistrationRejected):
+        push_to_url("   ")
+
+
+def test_push_to_url_maps_server_rejections():
+    with pytest.raises(RegistrationRejected) as excinfo:
+        push_to_url(
+            "https://api.day.app/KEY",
+            body="hello",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    400, json={"code": 400, "message": "invalid device key"}
+                )
+            ),
+        )
+    assert "invalid device key" in str(excinfo.value)
+
+    with pytest.raises(ServerRejected):
+        push_to_url(
+            "https://api.day.app/KEY",
+            transport=httpx.MockTransport(lambda request: httpx.Response(403, json={})),
+        )
+
+
+def test_push_to_url_maps_transport_failures():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host", request=request)
+
+    with pytest.raises(ServerUnreachable) as excinfo:
+        push_to_url("https://api.day.app/KEY", transport=httpx.MockTransport(handler))
+    assert "api.day.app" in str(excinfo.value)
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    with pytest.raises(ServerTimeout):
+        push_to_url("https://api.day.app/KEY", transport=httpx.MockTransport(timeout))

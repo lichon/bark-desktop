@@ -295,3 +295,23 @@ def test_toolbar_appends_a_notice_after_the_host_and_status(hidden_root, db):
         assert window.status_label.cget("text") == "api.day.app · Connected · toasts blocked"
     finally:
         window.destroy()
+
+
+def test_compose_bar_uses_the_general_route_state(hidden_root, db):
+    """A Bark-URL route enables Send even when Realtime is disconnected."""
+    sent: list[str] = []
+    window = _compose_window(
+        hidden_root,
+        db,
+        can_send_message=lambda: True,
+        supabase_connected=lambda: False,
+        on_send_message=lambda text: sent.append(text) or True,
+    )
+    try:
+        assert window.send_button.cget("state") == "normal"
+        window.message_var.set("to the phone")
+        window._send_message()
+        assert sent == ["to the phone"]
+        assert window.message_var.get() == ""
+    finally:
+        window.destroy()

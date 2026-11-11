@@ -180,8 +180,9 @@ class HistoryWindow:
         )
         self.delete_button.pack(side="right")
 
-        # Compose bar: send a message into the Supabase Realtime room from the
-        # UI.  The button stays disabled until the Realtime transport is active.
+        # Compose bar: send a message this machine writes.  The settings decide
+        # whether it goes to the Supabase Realtime room, a Bark URL, or both;
+        # the button stays disabled until at least one route is usable.
         composer = ttk.Frame(self.window, padding=(8, 0, 8, 8))
         composer.pack(side="bottom", fill="x")
         # Single row grid: both cells stretch vertically so the one-line entry
@@ -338,27 +339,34 @@ class HistoryWindow:
             return ""
 
     # -- compose bar ------------------------------------------------------- #
-    def _supabase_connected(self) -> bool:
-        getter = self.callbacks.get("supabase_connected")
+    def _can_send(self) -> bool:
+        """True when the configured self-message route can accept a message.
+
+        The controller answers this (`can_send_message`); older wiring that only
+        knew about the Realtime transport is still honoured.
+        """
+        getter = self.callbacks.get("can_send_message")
+        if getter is None:
+            getter = self.callbacks.get("supabase_connected")
         if getter is None:
             return False
         try:
             return bool(getter())
         except Exception:  # pragma: no cover - callback isolation
-            logger.exception("supabase_connected callback failed")
+            logger.exception("can_send_message callback failed")
             return False
 
     def _update_send_state(self) -> None:
-        """Enable Send only while the Realtime transport is connected.
+        """Enable Send while at least one configured route is usable.
 
-        The button wears the tray icon's online colour while the room is joined
-        and the icon's offline colour while it is not.
+        The button wears the tray icon's online colour while a message can go
+        out and the icon's offline colour while it cannot.
         """
-        connected = self._supabase_connected()
+        can_send = self._can_send()
         self.send_button.configure(
-            state="normal" if connected else "disabled",
-            background=SEND_ONLINE_BG if connected else SEND_OFFLINE_BG,
-            activebackground=SEND_ONLINE_ACTIVE_BG if connected else SEND_OFFLINE_BG,
+            state="normal" if can_send else "disabled",
+            background=SEND_ONLINE_BG if can_send else SEND_OFFLINE_BG,
+            activebackground=SEND_ONLINE_ACTIVE_BG if can_send else SEND_OFFLINE_BG,
             disabledforeground=SEND_OFFLINE_FG,
         )
 
@@ -368,7 +376,7 @@ class HistoryWindow:
 
     def _send_message(self) -> None:
         text = self.message_var.get().strip()
-        if not text or not self._supabase_connected():
+        if not text or not self._can_send():
             return
         callback = self.callbacks.get("on_send_message")
         if callback is None:

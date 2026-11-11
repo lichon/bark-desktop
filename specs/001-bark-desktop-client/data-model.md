@@ -144,6 +144,8 @@ Content store for notification images, addressed by URL hash.
 | `autostart_path` | `null` | Path written to the Run entry, for stale-path detection |
 | `launch_at_login_configured_at` | `null` | Timestamp of last autostart write |
 | `last_connected_at` | `null` | UTC ms, shown in the UI (supports the "you may have missed messages" message) |
+| `message_route` | `realtime` | `realtime` \| `bark` \| `both`; destination of compose-bar messages |
+| `message_route_url` | `""` | http(s) Bark push URL including the device key; optional query; used by the `bark`/`both` routes |
 | `log_level` | `info` | `debug` \| `info` \| `warning` |
 
 Settings are written atomically (temp + replace) and validated on load; invalid values fall back to defaults with a log entry rather than failing startup.

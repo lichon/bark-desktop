@@ -75,6 +75,29 @@ Used at startup (throttled to once per hour) and when the user presses "Check co
 - `200` with `code: 200` → the server accepted the push for delivery. This proves the whole chain (server → APNs → this client) *if and only if* the message also arrives on the stream; the client waits up to 30 s and reports both facts distinctly.
 - `400` / `500` → surface the server's `message` verbatim in the self-test result.
 
+## 5. Self-message route push
+
+`POST {message_route_url}`
+
+Used by the history window's compose bar when the self-message route is `bark`
+or `both`. The setting is the full push URL of the target device (device key in
+the path), optionally with Bark query parameters:
+
+```
+https://api.day.app/<device_key>
+http://127.0.0.1:8080/<device_key>?group=ops
+```
+
+```json
+{ "title": "<host name>", "body": "<composed line>", "group": "bark-desktop", "id": "<hex>" }
+```
+
+- Same success/failure semantics as the self-test push (`code: 200`).
+- The URL is user-configured and must use `http://` or `https://`; credentials
+  and fragments are rejected, query parameters are preserved.
+- This route does not depend on the Supabase Realtime connection and never
+  sends to a third party other than the URL the user configured.
+
 ## Error taxonomy mapping
 
 | Condition | Client error | User-visible message |

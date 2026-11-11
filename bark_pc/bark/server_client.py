@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..core.config import validate_server_url
+from ..core.config import validate_bark_push_url, validate_server_url
 from ..core.errors import (
     BarkError,
     RegistrationRejected,
@@ -207,3 +207,74 @@ class BarkServerClient:
             },
         )
         return payload
+
+
+def push_to_url(
+    push_url: str,
+    *,
+    title: str = "",
+    body: str = "",
+    group: str | None = None,
+    message_id: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> dict:
+    """POST a message to a Bark push URL that already carries a device key.
+
+    This is the route used by the history window's compose bar when the user
+    chooses *Bark URL*.  Bark accepts `POST https://server/<device_key>` with a
+    JSON body, so the configured URL is used verbatim (query parameters such as
+    `group=` are left intact).  Failures map onto the same `core.errors`
+    taxonomy as the rest of the Bark client.
+    """
+    url = validate_bark_push_url(push_url)
+    if not url:
+        raise RegistrationRejected("no Bark URL configured for self messages")
+    host = _host_of(url)
+    payload: dict = {
+        "title": title or "",
+        "body": body or "",
+        "id": message_id or uuid.uuid4().hex,
+    }
+    if group:
+        payload["group"] = group
+    try:
+        with httpx.Client(
+            transport=transport,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 10.0)),
+            follow_redirects=False,
+            event_hooks=client_event_hooks(),
+        ) as client:
+            response = client.post(url, json=payload)
+    except httpx.TimeoutException as exc:
+        raise ServerTimeout(detail=str(exc)) from exc
+    except httpx.TransportError as exc:
+        raise ServerUnreachable(host, detail=str(exc)) from exc
+
+    status = response.status_code
+    parsed: dict | None = None
+    try:
+        candidate = response.json()
+        if isinstance(candidate, dict):
+            parsed = candidate
+    except ValueError:
+        parsed = None
+    if status in (401, 403):
+        raise ServerRejected(status, "The Bark URL rejected the message (401/403).")
+    if status >= 500:
+        message = (parsed or {}).get("message") or f"HTTP {status}"
+        raise ServerError(message)
+    if status >= 400:
+        message = str((parsed or {}).get("message") or f"HTTP {status}")
+        raise RegistrationRejected.from_server(message)
+    if status != 200:
+        raise ServerError(f"unexpected HTTP {status}")
+    if parsed is None:
+        raise ServerError("the Bark URL returned a non-JSON response")
+    code = parsed.get("code")
+    if isinstance(code, int) and code != 200:
+        message = str(parsed.get("message") or f"code {code}")
+        if code in (401, 403):
+            raise ServerRejected(code, message)
+        raise RegistrationRejected.from_server(message)
+    return parsed

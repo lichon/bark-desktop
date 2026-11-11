@@ -21,11 +21,14 @@ from urllib.parse import urlsplit
 import anyio
 
 from .bark.links import ABANDON_NOTE, LinkManager
-from .bark.server_client import BarkServerClient, normalize_server_url
+from .bark.server_client import BarkServerClient, normalize_server_url, push_to_url
 from .core import models
 from .core.bus import BoundedEventQueue
 from .core.config import (
     DEFAULT_PUSH_TOPIC,
+    MESSAGE_ROUTE_BARK,
+    MESSAGE_ROUTE_BOTH,
+    MESSAGE_ROUTE_REALTIME,
     Paths,
     Settings,
     SettingsStore,
@@ -883,6 +886,10 @@ class BarkApp:
             self.stop_receiver()
             self.start_receiver()
         self.image_store.evict()
+        if self.history_window is not None:
+            # The compose bar depends on the message route, not only on the
+            # receiver status, so re-evaluate its Send button after a save.
+            self.history_window.refresh_status()
 
     def _rebuild_tts(self) -> None:
         """Recreate the speech provider after its settings changed."""
@@ -1092,8 +1099,8 @@ class BarkApp:
                     "on_open_settings": self.open_settings,
                     "on_clear_all": self.clear_history,
                     "connection_status": self._connection_status_text,
-                    "supabase_connected": self.is_supabase_connected,
-                    "on_send_message": self.send_supabase_message,
+                    "can_send_message": self.can_send_message,
+                    "on_send_message": self.send_message,
                     "on_copy_text": self.copy_text,
                     "on_retry_image": self.retry_image,
                     "toast_notice": self._toast_notice,
@@ -1236,39 +1243,89 @@ class BarkApp:
     def is_supabase_connected(self) -> bool:
         """True while the optional Realtime receiver is active.
 
-        The history window's Send button uses this to stay disabled until the
-        room is actually joined.
+        `can_send_message` combines this with the configured self-message route,
+        so the compose bar's Send button stays disabled until a route can send.
         """
         return self._transport_status.get("supabase") == PushStatus.ACTIVE
 
-    def send_supabase_message(self, text: str) -> bool:
-        """Broadcast a one-line message into the Realtime room (history UI)."""
+    def can_send_message(self) -> bool:
+        """True when the configured self-message route can take a message."""
+        route = self.settings.message_route
+        if route in (MESSAGE_ROUTE_REALTIME, MESSAGE_ROUTE_BOTH):
+            if self.is_supabase_connected() and self._supabase_config() is not None:
+                return True
+        if route in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH):
+            if (self.settings.message_route_url or "").strip():
+                return True
+        return False
+
+    def send_message(self, text: str) -> bool:
+        """Send a message this machine wrote through the configured route.
+
+        *Realtime room* keeps the previous behaviour; *Bark URL* POSTs to the
+        configured Bark push URL (no Supabase connection needed); *Both* uses
+        whichever of the two is available.  Network work happens on a worker
+        thread so the compose bar never blocks.
+        """
         text = (text or "").strip()
         if not text:
             return False
-        config = self._supabase_config()
-        if config is None:
-            self.log.warning("cannot send Realtime message: Supabase is not configured")
+        route = self.settings.message_route
+        realtime_config = None
+        if route in (MESSAGE_ROUTE_REALTIME, MESSAGE_ROUTE_BOTH):
+            if self.is_supabase_connected():
+                realtime_config = self._supabase_config()
+        bark_url = ""
+        if route in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH):
+            bark_url = (self.settings.message_route_url or "").strip()
+        if realtime_config is None and not bark_url:
+            self.log.warning(
+                "cannot send self message: the %s route is not available", route
+            )
             return False
-        # Publishing is network work; keep the UI thread free.
         threading.Thread(
-            target=self._publish_supabase_message,
-            args=(config, text),
-            name="bark-supabase-send",
+            target=self._publish_self_message,
+            args=(text, realtime_config, bark_url),
+            name="bark-self-message",
             daemon=True,
         ).start()
         return True
 
-    def _publish_supabase_message(self, config: tuple[str, str, str], text: str) -> None:
-        server, key, room = config
-        payload = {"aps": {"alert": {"body": text}}}
-        try:
-            supabase_realtime.publish_bark_payload(server, key, room, payload)
-            self.log.info("Realtime message sent (room %s)", room)
-        except BarkError as exc:
-            self.log.warning("Realtime message failed: %s", exc)
-            message = str(exc)
-            self._on_ui(lambda: self._notify_test_failure(message, "Message not sent"))
+    def _publish_self_message(
+        self,
+        text: str,
+        realtime_config: tuple[str, str, str] | None,
+        bark_url: str,
+    ) -> None:
+        delivered: list[str] = []
+        failures: list[str] = []
+        if realtime_config is not None:
+            server, key, room = realtime_config
+            payload = {"aps": {"alert": {"body": text}}}
+            try:
+                supabase_realtime.publish_bark_payload(server, key, room, payload)
+                delivered.append(f"Realtime room {room}")
+            except BarkError as exc:
+                failures.append(f"Realtime: {exc}")
+        if bark_url:
+            try:
+                push_to_url(
+                    bark_url,
+                    title=supabase_realtime.default_sender(),
+                    body=text,
+                    group="bark-desktop",
+                )
+                delivered.append("Bark URL")
+            except BarkError as exc:
+                failures.append(f"Bark: {exc}")
+        if delivered:
+            self.log.info("self message sent via %s", ", ".join(delivered))
+        for failure in failures:
+            self.log.warning("self message failed: %s", failure)
+        if failures:
+            message = "; ".join(failures)
+            title = "Message not sent" if not delivered else "Message partly sent"
+            self._on_ui(lambda: self._notify_test_failure(message, title))
 
     # ------------------------------------------------------------------ #
     # IPC + shutdown

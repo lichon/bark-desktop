@@ -18,7 +18,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from ..tts.base import DEFAULT_TTS_PROVIDER, TTS_PROVIDERS
 from . import models
@@ -31,8 +31,25 @@ DEFAULT_PUSH_TOPIC = "me.fin.bark"
 SETTINGS_FILENAME = "settings.json"
 SUPABASE_SCHEME = "sb"
 MAX_SUPABASE_KEY_LENGTH = 4096
+MAX_MESSAGE_ROUTE_URL_LENGTH = 2048
 
 LOG_LEVELS = ("debug", "info", "warning", "error")
+
+# Where the history window's compose bar sends a message this machine writes.
+MESSAGE_ROUTE_REALTIME = "realtime"
+MESSAGE_ROUTE_BARK = "bark"
+MESSAGE_ROUTE_BOTH = "both"
+MESSAGE_ROUTES = (
+    MESSAGE_ROUTE_REALTIME,
+    MESSAGE_ROUTE_BARK,
+    MESSAGE_ROUTE_BOTH,
+)
+DEFAULT_MESSAGE_ROUTE = MESSAGE_ROUTE_REALTIME
+MESSAGE_ROUTE_LABELS = {
+    MESSAGE_ROUTE_REALTIME: "Supabase Realtime room",
+    MESSAGE_ROUTE_BARK: "Bark URL",
+    MESSAGE_ROUTE_BOTH: "Both",
+}
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -224,6 +241,8 @@ class Settings:
     supabase_url: str = ""
     supabase_key: str = ""
     supabase_topic: str = "bark"
+    message_route: str = DEFAULT_MESSAGE_ROUTE
+    message_route_url: str = ""
     log_level: str = "info"
     window_size: str | None = None
     warnings: list[str] = field(default_factory=list, repr=False, compare=False)
@@ -327,6 +346,13 @@ class Settings:
                 if text not in LOG_LEVELS:
                     raise ValueError("expected debug|info|warning|error")
                 return text
+            if name == "message_route":
+                text = str(raw).strip().lower()
+                if text not in MESSAGE_ROUTES:
+                    raise ValueError("expected " + "|".join(MESSAGE_ROUTES))
+                return text
+            if name == "message_route_url":
+                return validate_bark_push_url(str(raw or ""))
             if name == "server_url":
                 return validate_server_url(str(raw))
             if name == "supabase_url":
@@ -407,6 +433,43 @@ def validate_supabase_url(raw: str) -> str:
         else:
             text = f"{SUPABASE_SCHEME}://{text}"
     return _validate_supabase_url(text)
+
+
+def validate_bark_push_url(raw: str) -> str:
+    """Canonicalize the Bark URL used for self messages (`""` stays empty).
+
+    The value is a Bark push URL that already carries the target device key —
+    for example `https://api.day.app/<device_key>` or a self-hosted equivalent.
+    A bare host is upgraded to `https`, a trailing slash is dropped, and query
+    parameters (Bark's `group=`, `sound=`, …) are preserved.  The message itself
+    is POSTed to this URL as JSON, so a path-only push URL works too.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if len(text) > MAX_MESSAGE_ROUTE_URL_LENGTH:
+        raise ValueError(f"expected at most {MAX_MESSAGE_ROUTE_URL_LENGTH} characters")
+    if "://" not in text:
+        text = f"https://{text}"
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("Bark URL must use http:// or https://")
+    if not parts.hostname:
+        raise ValueError("Bark URL has no host")
+    if parts.username or parts.password:
+        raise ValueError("Bark URL must not contain credentials")
+    if parts.fragment:
+        raise ValueError("Bark URL must not contain a fragment")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"Bark URL has an invalid port: {exc}") from exc
+    host = parts.hostname
+    netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    if port:
+        netloc = f"{netloc}:{port}"
+    path = parts.path.rstrip("/")
+    return urlunsplit((parts.scheme, netloc, path, parts.query, ""))
 
 
 def _is_loopback_host(host: str) -> bool:

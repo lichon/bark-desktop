@@ -7,7 +7,17 @@ import tkinter as tk
 from dataclasses import fields
 from tkinter import messagebox, ttk
 
-from ..core.config import Settings, validate_server_url, validate_supabase_url
+from ..core.config import (
+    MESSAGE_ROUTE_BARK,
+    MESSAGE_ROUTE_BOTH,
+    MESSAGE_ROUTE_LABELS,
+    MESSAGE_ROUTE_REALTIME,
+    MESSAGE_ROUTES,
+    Settings,
+    validate_bark_push_url,
+    validate_server_url,
+    validate_supabase_url,
+)
 from ..core.models import now_ms
 from ..tts import DEFAULT_TTS_PROVIDER, PROVIDER_LABEL_TO_NAME, PROVIDER_LABELS, TTS_PROVIDERS
 
@@ -196,8 +206,40 @@ class SettingsDialog:
 
         ttk.Separator(container).grid(row=19, column=0, columnspan=2, sticky="ew", pady=6)
 
+        ttk.Label(container, text="Message route", style="Subtitle.TLabel").grid(
+            row=20, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        ttk.Label(container, text="Send compose-bar messages to").grid(
+            row=21, column=0, sticky="w"
+        )
+        self.route_var = tk.StringVar()
+        self.route_combo = ttk.Combobox(
+            container,
+            textvariable=self.route_var,
+            values=[MESSAGE_ROUTE_LABELS[name] for name in MESSAGE_ROUTES],
+            state="readonly",
+            width=24,
+        )
+        self.route_combo.grid(row=21, column=1, sticky="w", pady=2)
+        self.route_combo.bind("<<ComboboxSelected>>", lambda _event: self._toggle_route_fields())
+        ttk.Label(container, text="Bark URL (device key included)").grid(
+            row=22, column=0, sticky="w"
+        )
+        self.route_url_var = tk.StringVar()
+        self.route_url_entry = ttk.Entry(
+            container, textvariable=self.route_url_var, width=42
+        )
+        self.route_url_entry.grid(row=22, column=1, sticky="ew", pady=2)
+        ttk.Label(
+            container,
+            text="For example https://api.day.app/<device_key>",
+            style="Muted.TLabel",
+        ).grid(row=23, column=1, sticky="w")
+
+        ttk.Separator(container).grid(row=24, column=0, columnspan=2, sticky="ew", pady=6)
+
         actions = ttk.Frame(container)
-        actions.grid(row=20, column=0, columnspan=2, sticky="ew")
+        actions.grid(row=25, column=0, columnspan=2, sticky="ew")
         ttk.Button(actions, text="Check connection", command=self._check_connection).pack(
             side="left"
         )
@@ -212,10 +254,10 @@ class SettingsDialog:
         )
 
         self.status_label = ttk.Label(container, text="", style="Muted.TLabel", wraplength=500)
-        self.status_label.grid(row=21, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.status_label.grid(row=26, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         buttons = ttk.Frame(container)
-        buttons.grid(row=22, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        buttons.grid(row=27, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ttk.Button(buttons, text="Cancel", command=self.close).pack(side="right")
         ttk.Button(buttons, text="Save", style="Accent.TButton", command=self._save).pack(
             side="right", padx=(0, 8)
@@ -232,6 +274,13 @@ class SettingsDialog:
         self.supabase_key_var.set(settings.supabase_key)
         self.supabase_topic_var.set(settings.supabase_topic or "bark")
         self._toggle_supabase_fields()
+        self.route_var.set(
+            MESSAGE_ROUTE_LABELS.get(
+                settings.message_route, MESSAGE_ROUTE_LABELS[MESSAGE_ROUTE_REALTIME]
+            )
+        )
+        self.route_url_var.set(settings.message_route_url)
+        self._toggle_route_fields()
         self.count_var.set(str(settings.history_retention_count))
         self.days_var.set(str(settings.history_retention_days))
         self.cache_var.set(str(settings.image_cache_mb))
@@ -258,6 +307,18 @@ class SettingsDialog:
         ):
             entry.configure(state=state)
 
+    def _toggle_route_fields(self) -> None:
+        route = self._selected_route()
+        state = "normal" if route in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH) else "disabled"
+        self.route_url_entry.configure(state=state)
+
+    def _selected_route(self) -> str:
+        label = self.route_var.get()
+        for name in MESSAGE_ROUTES:
+            if MESSAGE_ROUTE_LABELS[name] == label:
+                return name
+        return MESSAGE_ROUTE_REALTIME
+
     def _candidate(self) -> dict:
         silence_choice = self.silence_var.get()
         silence_until = None
@@ -276,6 +337,8 @@ class SettingsDialog:
             "supabase_url": validate_supabase_url(self.supabase_url_var.get()),
             "supabase_key": self.supabase_key_var.get().strip(),
             "supabase_topic": self.supabase_topic_var.get().strip() or "bark",
+            "message_route": self._selected_route(),
+            "message_route_url": validate_bark_push_url(self.route_url_var.get()),
             "history_retention_count": int(self.count_var.get()),
             "history_retention_days": int(self.days_var.get()),
             "image_cache_mb": int(self.cache_var.get()),
@@ -315,6 +378,15 @@ class SettingsDialog:
                 parent=self.window,
             )
             return
+        if candidate["message_route"] in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH):
+            if not candidate["message_route_url"]:
+                messagebox.showerror(
+                    "Invalid setting",
+                    "Enter the Bark URL that self messages should use "
+                    "(for example https://api.day.app/<device_key>).",
+                    parent=self.window,
+                )
+                return
         validated = Settings.from_dict(
             {**self.settings.to_dict(), **candidate, "warnings": []}, None
         )

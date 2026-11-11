@@ -182,3 +182,35 @@ def test_portable_paths_live_under_the_app_folder(portable_paths):
     assert portable_paths.images_dir.parent == portable_paths.data_dir
     assert portable_paths.logs_dir.parent == portable_paths.data_dir
     assert isinstance(Path(portable_paths.identity_path), Path)
+
+
+def test_message_route_defaults_to_the_realtime_room(settings_store):
+    settings = settings_store.load()
+    assert settings.message_route == "realtime"
+    assert settings.message_route_url == ""
+
+
+def test_message_route_and_bark_url_are_validated(portable_paths):
+    portable_paths.settings_path.write_text(
+        json.dumps(
+            {
+                "message_route": "BARK",
+                "message_route_url": "api.day.app/deviceKEY/?group=ops",
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = SettingsStore(portable_paths).load()
+    assert settings.message_route == "bark"
+    assert settings.message_route_url == "https://api.day.app/deviceKEY?group=ops"
+
+
+def test_invalid_message_route_and_bark_url_fall_back(portable_paths):
+    portable_paths.settings_path.write_text(
+        json.dumps({"message_route": "telegram", "message_route_url": "ftp://host/key"}),
+        encoding="utf-8",
+    )
+    settings = SettingsStore(portable_paths).load()
+    assert settings.message_route == "realtime"
+    assert settings.message_route_url == ""
+    assert len(settings.warnings) >= 2

@@ -117,21 +117,48 @@ the APNs transport. Loopback projects (`sb://127.0.0.1:54321`) use plain `ws://`
 hosted projects use `wss://`. *Check connection* verifies the project/key through
 Supabase's REST endpoint. *Test notification* / the wizard's self-test only
 pushes through the Bark server, never into the room, so one test never shows up
-twice. The history window's bottom compose bar broadcasts a one-line message
-into the room: its *Send* button is enabled only while the Realtime transport is
-connected, and Enter sends. The button wears the tray icon's colours: blue (the
-icon's online ring) while the room is joined, grey (the icon's offline ring) and
-disabled while it is not. The app's own frame goes out with this machine's
-host name as `sender` (the name a room's other participants see), and the id of
-every message it publishes is remembered for a few minutes. The app's own
-receiver sees that broadcast too, but recognises it by that id — not by the
-`sender` label, which anyone can reuse — so it is stored in the history
-**already read**, and no toast is shown and no speech is spoken for it. Messages
-from every other sender behave as usual.
+twice. The history window's bottom compose bar sends a one-line message this
+machine writes; *Settings → Message route* chooses the route (the Realtime room,
+a Bark URL, or both, see below). Its *Send* button is enabled while at least one
+selected route is usable, and Enter sends. The button wears the tray icon's
+colours: blue (the icon's online ring) while a message can go out, grey (the
+icon's offline ring) and disabled while it cannot. When the Realtime route is
+used, the app's own frame goes out with this machine's host name as `sender`
+(the name a room's other participants see), and the id of every message it
+publishes is remembered for a few minutes. The app's own receiver sees that
+broadcast too, but recognises it by that id — not by the `sender` label, which
+anyone can reuse — so it is stored in the history **already read**, and no toast
+is shown and no speech is spoken for it. Messages from every other sender behave
+as usual.
 
 Nothing Apple-specific happens for the Realtime side: it reuses the device
 activation performed for the Bark server, and toggling it never re-registers
 that key. Turning it off does not affect Bark delivery.
+
+## Routing self messages
+
+The compose bar at the bottom of the history window sends messages this machine
+writes. *Settings → Message route → Send compose-bar messages to* chooses where
+they go:
+
+| Route | Needs | What happens |
+|-------|-------|--------------|
+| Supabase Realtime room (default) | Realtime enabled and joined | Broadcasts the line into the room, as described above. |
+| Bark URL | a Bark push URL | POSTs the line to that URL as a normal Bark push. |
+| Both | either one | Uses every route that is currently available. |
+
+The Bark URL is the full push URL of the target device, device key included —
+for example `https://api.day.app/<device_key>` or a self-hosted equivalent such
+as `http://127.0.0.1:8080/<device_key>`. Query parameters are kept, so
+`?group=ops&level=timeSensitive` works like any other Bark URL. The client POSTs
+`{title, body, group, id}` as JSON to exactly that URL: the title is this
+machine's host name, the group is `bark-desktop`, and the body is the composed
+line. No Supabase project is needed for this route, so the *Send* button works
+while the URL is configured even if the Realtime room is off or disconnected.
+
+*Both* is useful when the room's other participants should see the message and
+the phone should receive it as a Bark push. If one route fails, the other is
+still used, and the tray reports which route failed.
 
 ## Tray and windows
 
@@ -201,7 +228,8 @@ Set `BARK_PC_DATA` to use a different data folder.
 * Notification content stays on this machine. The only outbound connections are
   Apple's activation service, Apple's courier, the Bark server you chose, the
   Supabase project and its Realtime WebSocket when the optional room is enabled,
-  and the image URLs contained in your own pushes.
+  the Bark URL configured for self messages, and the image URLs contained in
+  your own pushes.
 * The activation identity
   (`%LOCALAPPDATA%\BarkDesktopClient\identity.bin`) is encrypted with Windows
   DPAPI. It cannot be read by another Windows account, even if the folder is

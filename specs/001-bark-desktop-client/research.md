@@ -125,7 +125,7 @@ async with apns.create_apns_connection(cert, key, token=cached_base_token,
 
 ## R11. Portable packaging — PyInstaller onedir
 
-**Decision**: PyInstaller `--onedir --windowed` producing `BarkDesktopClient/` with `bark_pc.exe` plus `_internal/`; ship as a zip. Include license notices for pypush (SSPL), pystray (LGPL-3.0), Pillow (HPND), windows-toasts (MIT).
+**Decision**: PyInstaller `--onedir --windowed` producing `BarkDesktopClient/` with `bark.exe` plus `_internal/`; ship as a zip. Include license notices for pypush (SSPL), pystray (LGPL-3.0), Pillow (HPND), windows-toasts (MIT).
 
 **Rationale**: onedir starts fastest and lets a portable folder be moved as a unit; windowed mode avoids a console; hidden imports for `winrt.*` and pypush are explicit in the spec file. Approximate payload: Python runtime ~15 MB, site-packages ~62 MB in the spike venv (includes test-only extras), so expect a ~45–70 MB zip.
 

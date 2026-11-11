@@ -34,13 +34,13 @@ def test_show_log_folder_is_a_top_level_item() -> None:
     controller, _calls = _controller()
     labels = [item.text for item in _items(controller)]
 
-    assert "Show log folder" in labels
+    assert "Logs…" in labels
     assert pystray.Menu.SEPARATOR not in _items(controller)
 
 
 def test_show_log_folder_invokes_the_registered_action() -> None:
     controller, calls = _controller()
-    item = next(item for item in _items(controller) if item.text == "Show log folder")
+    item = next(item for item in _items(controller) if item.text == "Logs…")
 
     item(None)
 

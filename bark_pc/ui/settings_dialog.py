@@ -78,7 +78,7 @@ class SettingsDialog:
         self.supabase_enabled_var = tk.BooleanVar()
         ttk.Checkbutton(
             self.supabase_frame,
-            text="Also receive broadcasts from a Supabase Realtime room",
+            text="Receive broadcasts from a Supabase Realtime room",
             variable=self.supabase_enabled_var,
             command=self._toggle_supabase_fields,
         ).grid(row=0, column=0, columnspan=2, sticky="w")

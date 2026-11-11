@@ -194,8 +194,11 @@ class BarkApp:
                 self.shell.post(pending) if self.shell else pending()
         else:
             self.start_receiver()
-            if pending is not None and self.shell is not None:
-                self.shell.post(pending)
+            if self.shell is not None:
+                # A URI (toast activation) wins; otherwise land on the history
+                # window so launches after the first run show something.  The
+                # app still keeps running in the tray when the window is closed.
+                self.shell.post(pending if pending is not None else self.open_history)
 
         if self.start_ui:
             self.shell.post(self._post_startup_checks)
@@ -323,13 +326,8 @@ class BarkApp:
     def _tray_summary(self) -> str:
         link = self.db.get_link()
         server = link.server_url if link and link.server_url else "not linked"
-        if self.settings.supabase_enabled and self.settings.supabase_url:
-            server = f"{server} + room {self.settings.supabase_topic or 'bark'}"
-        unread = self.db.unread_count()
         status = self.tray.status.value if self.tray else "starting"
-        summary = f"{APP_NAME}\n{server} · {status} · {unread} unread"
-        if self.toast_failure:
-            summary = f"{summary}\nToasts blocked — {self.toast_failure}"
+        summary = f"{server} · {status}"
         return summary
 
     def _toast_notice(self) -> str:
@@ -825,25 +823,13 @@ class BarkApp:
                 try:
                     client.ping()
                     host = urlsplit(link.server_url).hostname or link.server_url
-                    notes.append(f"Bark: {host}")
+                    notes.append(f"Bark: {host} ok")
                 except BarkError as exc:
                     problems.append(f"Bark: {exc}")
                 finally:
                     client.close()
             else:
                 problems.append("Bark server: not configured")
-            if self.settings.supabase_enabled:
-                config = self._supabase_config()
-                if config is None:
-                    problems.append("Supabase Realtime: project address or auth key missing")
-                else:
-                    server, key, room = config
-                    try:
-                        supabase_realtime.ping(server, key)
-                        host = urlsplit(server).hostname or server
-                        notes.append(f"Supabase: {host} · room {room}")
-                    except BarkError as exc:
-                        problems.append(f"Supabase Realtime: {exc}")
             message = "; ".join(notes + problems)
             done(not problems, message)
 
@@ -1103,6 +1089,7 @@ class BarkApp:
                 image_store=self.image_store,
                 callbacks={
                     "on_read": lambda _id: self._refresh_status_summary(),
+                    "on_open_settings": self.open_settings,
                     "on_clear_all": self.clear_history,
                     "connection_status": self._connection_status_text,
                     "supabase_connected": self.is_supabase_connected,

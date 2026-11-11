@@ -12,6 +12,7 @@ import logging
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
+from urllib.parse import urlsplit
 
 from ..core.models import (
     BODY_MAX_STORED_BYTES,
@@ -102,8 +103,10 @@ class HistoryWindow:
     def _build(self) -> None:
         toolbar = ttk.Frame(self.window, padding=(8, 6))
         toolbar.pack(side="top", fill="x")
-        self.refresh_button = ttk.Button(toolbar, text="Refresh", command=self.refresh)
-        self.refresh_button.pack(side="left")
+        self.settings_button = ttk.Button(
+            toolbar, text="Settings", command=self._open_settings
+        )
+        self.settings_button.pack(side="left")
         ttk.Button(toolbar, text="Clear all", command=self._clear_all).pack(
             side="left", padx=(6, 0)
         )
@@ -279,17 +282,49 @@ class HistoryWindow:
         self.status_label.configure(text=text)
         self._update_send_state()
 
+    def _open_settings(self) -> None:
+        """Open the settings dialog through the controller."""
+        callback = self.callbacks.get("on_open_settings")
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # pragma: no cover - UI callback must not crash
+            logger.exception("open settings failed")
+
     def _status_text(self) -> str:
-        """Connection state from the controller (falls back to *Starting*)."""
+        """Server host plus connection state from the controller.
+
+        The host keeps the label unambiguous when several Bark servers are in
+        use; it is omitted while no link is stored (the state alone is shown).
+        """
+        label = ""
         getter = self.callbacks.get("connection_status")
         if getter is not None:
             try:
                 text = getter()
                 if text:
-                    return str(text)
+                    label = str(text)
             except Exception:  # pragma: no cover - callback isolation
                 logger.exception("connection_status callback failed")
-        return CONNECTION_STATUS_LABELS[ConnectionStatus.STARTING]
+        if not label:
+            label = CONNECTION_STATUS_LABELS[ConnectionStatus.STARTING]
+        host = self._server_host()
+        return f"{host} · {label}" if host else label
+
+    def _server_host(self) -> str:
+        """Bark server host (`host:port`) from the stored link, or empty."""
+        try:
+            link = self.db.get_link()
+        except Exception:  # pragma: no cover - repository isolation
+            logger.exception("reading the link failed")
+            return ""
+        if link is None or not link.server_url:
+            return ""
+        try:
+            return urlsplit(link.server_url).netloc or link.server_url
+        except ValueError:  # pragma: no cover - defensive
+            return link.server_url
 
     def _notice(self) -> str:
         """Optional trailing hint from the controller (e.g. failed toasts)."""

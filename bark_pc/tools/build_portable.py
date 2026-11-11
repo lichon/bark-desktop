@@ -2,7 +2,7 @@
 
     python -m bark_pc.tools.build_portable [--no-zip]
 
-Produces `dist/BarkDesktopClient/` containing `bark_pc.exe` and `_internal/`,
+Produces `dist/BarkDesktopClient/` containing `bark.exe` and `_internal/`,
 copies `NOTICE`/`README.md` next to the exe, and zips the folder for
 distribution.  Hidden imports come from spike T2 (WinRT namespace packages and
 the pypush/anyio backends that are imported dynamically).
@@ -14,10 +14,15 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
+# Distribution folder and zip name.
 APP_NAME = "BarkDesktopClient"
+# Name of the executable inside the bundle (PyInstaller names the onedir
+# `--name` as well, so the staging folder is renamed to APP_NAME afterwards).
+EXE_NAME = "bark"
 ENTRY = Path("bark_pc/launcher.py")
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -43,6 +48,25 @@ HIDDEN_IMPORTS = [
 COLLECT_ALL = ["pystray", "windows_toasts", "winrt", "pypush", "segno", "websockets"]
 
 
+def _rename_with_retry(
+    source: Path, target: Path, attempts: int = 10, delay: float = 0.5
+) -> None:
+    """Rename a freshly written bundle folder.
+
+    Windows sometimes reports a transient ``PermissionError`` while a virus
+    scanner or the search indexer still holds handles on the new files, so retry
+    briefly before giving up.
+    """
+    for attempt in range(attempts):
+        try:
+            source.rename(target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def build(zip_output: bool = True) -> Path:
     dist_dir = ROOT / "dist"
     build_dir = ROOT / "build"
@@ -55,7 +79,7 @@ def build(zip_output: bool = True) -> Path:
         "--onedir",
         "--windowed",
         "--name",
-        APP_NAME,
+        EXE_NAME,
         "--distpath",
         str(dist_dir),
         "--workpath",
@@ -78,6 +102,11 @@ def build(zip_output: bool = True) -> Path:
     subprocess.run(command, check=True, cwd=ROOT)
 
     bundle = dist_dir / APP_NAME
+    staged = dist_dir / EXE_NAME
+    if staged != bundle:
+        if bundle.exists():
+            shutil.rmtree(bundle)
+        _rename_with_retry(staged, bundle)
     for extra in ("NOTICE", "README.md", "LICENSE"):
         source = ROOT / extra
         if source.exists():

@@ -17,7 +17,7 @@ and real pushes.
 * `tests/unit/test_encoding.py` — CJK, RTL and emoji survive parsing and a
   database round-trip; truncation never splits a character; timestamps render in
   one stable local format.
-* `HistoryWindow` implements: toolbar (Mark all read / Refresh / counts), list
+* `HistoryWindow` implements: toolbar (Mark all read / Settings / counts), list
   columns `unread | time | title | group`, keyboard `Up/Down/Enter/Delete`,
   100-row paging with *Load more*, empty state with a hint to copy the device key,
   detail pane with selectable body, *Open link* (http(s) only), *Copy content*,

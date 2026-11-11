@@ -30,8 +30,8 @@ Registered under `HKCU\Software\Classes\barkpc`:
 |-------|------|
 | `(Default)` | `URL:Bark Desktop Client` |
 | `URL Protocol` | `""` |
-| `DefaultIcon\(Default)` | `"<app dir>\bark_pc.exe",0` |
-| `shell\open\command\(Default)` | `"<app dir>\bark_pc.exe" "%1"` |
+| `DefaultIcon\(Default)` | `"<app dir>\bark.exe",0` |
+| `shell\open\command\(Default)` | `"<app dir>\bark.exe" "%1"` |
 
 Grammar:
 
@@ -51,7 +51,7 @@ barkpc:setup                      → open the setup wizard
 
 | Value name | Data |
 |------------|------|
-| `BarkDesktopClient` | `"<absolute path to bark_pc.exe>"` (quoted) |
+| `BarkDesktopClient` | `"<absolute path to bark.exe>"` (quoted) |
 
 - Written only when the user enables "Start with Windows"; deleted when disabled or when "Remove all data" runs.
 - `settings.autostart_path` stores the path that was written. On startup, if `autostart_enabled` is true and the stored path differs from the current exe path, the UI offers "Repair startup entry" (one confirmation, then rewrite) or "Disable" (FR-037).

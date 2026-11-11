@@ -6,7 +6,7 @@ import tkinter as tk
 
 import pytest
 
-from bark_pc.core.models import Notification
+from bark_pc.core.models import BarkLink, LinkState, Notification
 from bark_pc.ui.history_window import HistoryWindow
 from bark_pc.ui.theme import SEND_OFFLINE_BG, SEND_ONLINE_BG
 
@@ -245,5 +245,53 @@ def test_composer_keeps_the_text_when_the_callback_refuses(hidden_root, db):
         window.message_var.set("retry me")
         window._send_message()
         assert window.message_var.get() == "retry me"
+    finally:
+        window.destroy()
+
+
+def _seed_link(db, url: str) -> None:
+    db.upsert_link(
+        BarkLink(server_url=url, device_key="seedKey123", state=LinkState.LINKED)
+    )
+
+
+def test_toolbar_prefixes_the_status_with_the_server_host(hidden_root, db):
+    _seed_link(db, "https://api.day.app")
+    window = _compose_window(hidden_root, db, connection_status=lambda: "Connected")
+    try:
+        assert window.status_label.cget("text") == "api.day.app · Connected"
+    finally:
+        window.destroy()
+
+
+def test_toolbar_keeps_the_port_of_a_self_hosted_server(hidden_root, db):
+    _seed_link(db, "http://127.0.0.1:8080")
+    window = _compose_window(
+        hidden_root, db, connection_status=lambda: "Reconnecting…"
+    )
+    try:
+        assert window.status_label.cget("text") == "127.0.0.1:8080 · Reconnecting…"
+    finally:
+        window.destroy()
+
+
+def test_toolbar_shows_only_the_state_without_a_link(hidden_root, db):
+    window = _compose_window(hidden_root, db)
+    try:
+        assert window.status_label.cget("text") == "Starting"
+    finally:
+        window.destroy()
+
+
+def test_toolbar_appends_a_notice_after_the_host_and_status(hidden_root, db):
+    _seed_link(db, "https://api.day.app")
+    window = _compose_window(
+        hidden_root,
+        db,
+        connection_status=lambda: "Connected",
+        toast_notice=lambda: "toasts blocked",
+    )
+    try:
+        assert window.status_label.cget("text") == "api.day.app · Connected · toasts blocked"
     finally:
         window.destroy()

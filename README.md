@@ -14,7 +14,8 @@ history, image previews, and recall (delete) support.
 
 1. Unpack `BarkDesktopClient.zip` anywhere you can write to (for example
    `%LOCALAPPDATA%\Programs\BarkDesktopClient`).
-2. Run `bark_pc.exe`. The setup wizard opens; the tray icon appears.
+2. Run `bark_pc.exe`. The first launch opens the setup wizard; later launches
+   open the History window. The tray icon appears either way.
 3. Choose the Bark server:
    * **Public server** — `https://api.day.app` (default), or
    * **Self-hosted** — for example `http://127.0.0.1:8080`.
@@ -133,7 +134,7 @@ that key. Turning it off does not affect Bark delivery.
 
 | Action | Where |
 |--------|-------|
-| Open | Double-click the tray icon, or tray menu → *Open* |
+| Messages | Double-click the tray icon, or tray menu → *Messages* |
 | Mark all read | Tray menu → *Mark all read* |
 | Send a test notification | Tray menu → *Test notification* |
 | Read notifications aloud | Tray menu → *Speak notifications* (toggle) |

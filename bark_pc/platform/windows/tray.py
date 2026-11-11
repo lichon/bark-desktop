@@ -154,14 +154,14 @@ class TrayController:
         return pystray.Menu(
             item(lambda _item: self.summary(), self._noop, enabled=False),
             pystray.Menu.SEPARATOR,
-            item("Open", lambda: self._call("open_history"), default=True),
+            item("Messages", lambda: self._call("open_history"), default=True),
             item("Test notification", lambda: self._call("test_notification")),
             toggle_tts,
             item("Copy device key", lambda: self._call("copy_key")),
             pystray.Menu.SEPARATOR,
             item("Settings…", lambda: self._call("settings")),
             item("Setup…", lambda: self._call("setup")),
-            item("Show log folder", lambda: self._call("show_log_folder")),
+            item("Logs…", lambda: self._call("show_log_folder")),
             pystray.Menu.SEPARATOR,
             item("Quit", lambda: self._call("quit")),
         )

@@ -109,7 +109,7 @@ Expected: working set under 150 MB, average CPU under 1% over the hour, unread b
 .venv\Scripts\python bark_pc\tools\build_portable.py
 ```
 
-Expected: `dist/BarkDesktopClient/` contains `bark_pc.exe` and `_internal/`; zipping and unpacking to a clean folder on a machine without Python still starts, activates, registers, and receives a push. Verify license notices are present for pypush (SSPL), pystray (LGPL-3.0), Pillow, and windows-toasts.
+Expected: `dist/BarkDesktopClient/` contains `bark.exe` and `_internal/`; zipping and unpacking to a clean folder on a machine without Python still starts, activates, registers, and receives a push. Verify license notices are present for pypush (SSPL), pystray (LGPL-3.0), Pillow, and windows-toasts.
 
 ## 10. Failure-path checks
 

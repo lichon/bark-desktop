@@ -203,14 +203,20 @@ class SettingsDialog:
         ttk.Button(voice, text="Test voice", command=self._test_voice).pack(
             side="left", padx=(10, 0)
         )
+        self.tts_unlocked_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            container,
+            text="Only read aloud while the screen is unlocked",
+            variable=self.tts_unlocked_var,
+        ).grid(row=19, column=0, columnspan=2, sticky="w")
 
-        ttk.Separator(container).grid(row=19, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(container).grid(row=20, column=0, columnspan=2, sticky="ew", pady=6)
 
         ttk.Label(container, text="Message route", style="Subtitle.TLabel").grid(
-            row=20, column=0, columnspan=2, sticky="w", pady=(0, 4)
+            row=21, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         ttk.Label(container, text="Send compose-bar messages to").grid(
-            row=21, column=0, sticky="w"
+            row=22, column=0, sticky="w"
         )
         self.route_var = tk.StringVar()
         self.route_combo = ttk.Combobox(
@@ -220,26 +226,26 @@ class SettingsDialog:
             state="readonly",
             width=24,
         )
-        self.route_combo.grid(row=21, column=1, sticky="w", pady=2)
+        self.route_combo.grid(row=22, column=1, sticky="w", pady=2)
         self.route_combo.bind("<<ComboboxSelected>>", lambda _event: self._toggle_route_fields())
         ttk.Label(container, text="Bark URL (device key included)").grid(
-            row=22, column=0, sticky="w"
+            row=23, column=0, sticky="w"
         )
         self.route_url_var = tk.StringVar()
         self.route_url_entry = ttk.Entry(
             container, textvariable=self.route_url_var, width=42
         )
-        self.route_url_entry.grid(row=22, column=1, sticky="ew", pady=2)
+        self.route_url_entry.grid(row=23, column=1, sticky="ew", pady=2)
         ttk.Label(
             container,
             text="For example https://api.day.app/<device_key>",
             style="Muted.TLabel",
-        ).grid(row=23, column=1, sticky="w")
+        ).grid(row=24, column=1, sticky="w")
 
-        ttk.Separator(container).grid(row=24, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(container).grid(row=25, column=0, columnspan=2, sticky="ew", pady=6)
 
         actions = ttk.Frame(container)
-        actions.grid(row=25, column=0, columnspan=2, sticky="ew")
+        actions.grid(row=26, column=0, columnspan=2, sticky="ew")
         ttk.Button(actions, text="Check connection", command=self._check_connection).pack(
             side="left"
         )
@@ -254,10 +260,10 @@ class SettingsDialog:
         )
 
         self.status_label = ttk.Label(container, text="", style="Muted.TLabel", wraplength=500)
-        self.status_label.grid(row=26, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.status_label.grid(row=27, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         buttons = ttk.Frame(container)
-        buttons.grid(row=27, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        buttons.grid(row=28, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ttk.Button(buttons, text="Cancel", command=self.close).pack(side="right")
         ttk.Button(buttons, text="Save", style="Accent.TButton", command=self._save).pack(
             side="right", padx=(0, 8)
@@ -294,6 +300,7 @@ class SettingsDialog:
         self.tts_rate_var.set(str(settings.tts_rate))
         self.tts_volume_var.set(str(settings.tts_volume))
         self.tts_body_var.set(bool(settings.tts_include_body))
+        self.tts_unlocked_var.set(bool(settings.tts_only_when_unlocked))
         self.silence_var.set("Off")
         if settings.silence_until and settings.silence_until > now_ms():
             self.silence_var.set("For 1 hour")
@@ -349,6 +356,7 @@ class SettingsDialog:
                 self.tts_provider_var.get(), DEFAULT_TTS_PROVIDER
             ),
             "tts_include_body": bool(self.tts_body_var.get()),
+            "tts_only_when_unlocked": bool(self.tts_unlocked_var.get()),
             "tts_rate": int(self.tts_rate_var.get()),
             "tts_volume": int(self.tts_volume_var.get()),
             "silence_until": silence_until,

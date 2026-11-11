@@ -23,6 +23,7 @@ from bark_pc.tts import (
     ThreadedTtsProvider,
     build_tts_provider,
     normalize_provider,
+    should_speak,
     speech_text,
 )
 from bark_pc.tts.base import DEFAULT_TTS_PROVIDER
@@ -104,6 +105,7 @@ def test_tts_defaults_use_the_windows_provider_and_stay_off():
     assert settings.tts_enabled is False
     assert settings.tts_provider == DEFAULT_TTS_PROVIDER == "windows"
     assert settings.tts_include_body is True
+    assert settings.tts_only_when_unlocked is True
     assert settings.tts_rate == 0
     assert settings.tts_volume == 100
     assert settings.tts_max_chars == 300
@@ -114,6 +116,7 @@ def test_tts_settings_survive_a_save_and_load_round_trip(settings_store):
         tts_enabled=True,
         tts_provider="none",
         tts_include_body=False,
+        tts_only_when_unlocked=False,
         tts_rate=-4,
         tts_volume=40,
     )
@@ -123,6 +126,7 @@ def test_tts_settings_survive_a_save_and_load_round_trip(settings_store):
 
     assert (loaded.tts_enabled, loaded.tts_provider) == (True, "none")
     assert (loaded.tts_include_body, loaded.tts_rate, loaded.tts_volume) == (False, -4, 40)
+    assert loaded.tts_only_when_unlocked is False
 
 
 def test_invalid_tts_values_fall_back_to_defaults():
@@ -130,6 +134,7 @@ def test_invalid_tts_values_fall_back_to_defaults():
         {
             "tts_enabled": "yes",
             "tts_provider": "acme-cloud",
+            "tts_only_when_unlocked": "sure",
             "tts_rate": 99,
             "tts_volume": -5,
             "tts_max_chars": 5,
@@ -138,10 +143,29 @@ def test_invalid_tts_values_fall_back_to_defaults():
 
     assert settings.tts_enabled is False
     assert settings.tts_provider == "windows"
+    assert settings.tts_only_when_unlocked is True
     assert settings.tts_rate == 0
     assert settings.tts_volume == 100
     assert settings.tts_max_chars == 300
-    assert len(settings.warnings) == 5
+    assert len(settings.warnings) == 6
+
+
+# --------------------------------------------------------------------------- #
+# Speaking gate: locked screen suppresses speech
+# --------------------------------------------------------------------------- #
+
+
+def test_speech_needs_tts_on_and_no_silence_window():
+    assert should_speak(enabled=True, silenced=False, only_when_unlocked=True, locked=False) is True
+    assert (
+        should_speak(enabled=False, silenced=False, only_when_unlocked=True, locked=False) is False
+    )
+    assert should_speak(enabled=True, silenced=True, only_when_unlocked=True, locked=False) is False
+
+
+def test_a_locked_screen_suppresses_speech_unless_the_user_opted_out():
+    assert should_speak(enabled=True, silenced=False, only_when_unlocked=True, locked=True) is False
+    assert should_speak(enabled=True, silenced=False, only_when_unlocked=False, locked=True) is True
 
 
 def test_provider_names_are_normalised_case_insensitively():

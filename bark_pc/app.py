@@ -52,6 +52,7 @@ from .images.cache import ImageStore
 from .images.fetcher import ImageFetcher
 from .platform.windows.autostart import WindowsAutostart, repair_decision
 from .platform.windows.secrets import get_store
+from .platform.windows.session import WindowsSessionState
 from .platform.windows.single_instance import SingleInstanceManager
 from .platform.windows.toast import WindowsToastNotifier
 from .platform.windows.tray import TrayController
@@ -61,7 +62,7 @@ from .push.identity import IdentityManager
 from .push.ingest import Ingestor
 from .push.pypush_client import PypushReceiver
 from .push.supervisor import PushSupervisor
-from .tts import TTS_PREVIEW_TEXT, build_tts_provider, speech_text
+from .tts import TTS_PREVIEW_TEXT, build_tts_provider, should_speak, speech_text
 from .ui.setup_wizard import SetupResult, SetupWizard
 
 logger = logging.getLogger("bark_pc.app")
@@ -120,6 +121,7 @@ class BarkApp:
         )
         self.single = SingleInstanceManager(self.paths.instance_path, logger_=self.log)
         self.autostart = WindowsAutostart()
+        self.session = WindowsSessionState()
         self.uri_handler = WindowsUriHandler()
         self.tts = build_tts_provider(
             self.settings.tts_provider,
@@ -605,7 +607,18 @@ class BarkApp:
 
     def _speak(self, notification: Notification) -> None:
         """UI thread: read the notification aloud when the user asked for it."""
-        if not self.settings.tts_enabled or self.is_silenced():
+        enabled = bool(self.settings.tts_enabled)
+        silenced = self.is_silenced()
+        only_when_unlocked = bool(self.settings.tts_only_when_unlocked)
+        locked = only_when_unlocked and self.is_screen_locked()
+        if not should_speak(
+            enabled=enabled,
+            silenced=silenced,
+            only_when_unlocked=only_when_unlocked,
+            locked=locked,
+        ):
+            if locked and enabled and not silenced:
+                self.log.debug("screen is locked: not reading the notification aloud")
             return
         text = speech_text(
             notification,
@@ -614,6 +627,14 @@ class BarkApp:
             max_chars=self.settings.tts_max_chars,
         )
         self._speak_line(text)
+
+    def is_screen_locked(self) -> bool:
+        """Whether the workstation is locked; a probe failure means "unlocked"."""
+        try:
+            return bool(self.session.is_locked())
+        except Exception:  # pragma: no cover - the probe must never mute speech
+            self.log.debug("screen lock probe failed", exc_info=True)
+            return False
 
     def _speak_line(self, text: str) -> None:
         try:

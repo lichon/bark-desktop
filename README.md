@@ -199,6 +199,12 @@ it on in *Settings → Text-to-speech → Speak notifications aloud*, or toggle
   backlog.
 * With *Hide preview text* on, the voice says only "New notification";
   silenced notifications are never spoken.
+* **Nothing is spoken while the screen is locked.** A locked workstation means
+  the user is away, so a read-out would only be overheard. The check is the
+  Windows session flags (`WTSSessionInfoEx`) with `OpenInputDesktop` as a
+  fallback; untick *Settings → Text-to-speech → Only read aloud while the
+  screen is unlocked* to be read to while locked. Speech already in progress
+  when the screen locks finishes its sentence.
 * Bodies are trimmed to 300 characters and markdown/images/URLs are stripped
   first, so a link-heavy push is readable rather than spelled out.
 
@@ -251,7 +257,7 @@ Set `BARK_PC_DATA` to use a different data folder.
 | Every activation fails with an Apple error | Activation endpoint blocked, changed, or rate-limited | Check `%LOCALAPPDATA%\BarkDesktopClient\logs\app.log`; wait a minute before retrying. |
 | Tray icon disappears after restarting Explorer | Shell notification-area reset | The app re-adds it within a minute. |
 | Images never load | Host blocks non-browser user agents, TLS failure, or a non-image content type | The log records the URL hash and the reason; try a different host. |
-| Notifications are not read aloud | Speech is off, Windows has no voice installed, or SAPI is unavailable | Enable *Settings → Text-to-speech → Speak notifications aloud* and press *Test voice*. The log records `text-to-speech unavailable (windows provider): …`; install a voice under *Settings → Time & language → Speech → Manage voices*. |
+| Notifications are not read aloud | Speech is off, the screen is locked, Windows has no voice installed, or SAPI is unavailable | Enable *Settings → Text-to-speech → Speak notifications aloud* and press *Test voice*. While the screen is locked the app stays silent by design (see *Only read aloud while the screen is unlocked*). The log records `text-to-speech unavailable (windows provider): …`; install a voice under *Settings → Time & language → Speech → Manage voices*. |
 | App will not start after moving the folder | The autostart entry points at the old path | Launch it manually once and accept the repair prompt. |
 
 Diagnostics for a bug report: *Settings → Export diagnostics* writes a zip with

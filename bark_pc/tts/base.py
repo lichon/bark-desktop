@@ -27,6 +27,24 @@ class TtsProvider(Protocol):
     def shutdown(self, timeout: float = 2.0) -> None: ...
 
 
+def should_speak(
+    *,
+    enabled: bool,
+    silenced: bool,
+    only_when_unlocked: bool,
+    locked: bool,
+) -> bool:
+    """The one place that decides whether a notification may be read aloud.
+
+    Speaking is the only channel that can be overheard by whoever is in the
+    room, so a locked screen (user away) suppresses it unless the user
+    explicitly asked to be read to anyway.
+    """
+    if not enabled or silenced:
+        return False
+    return not (only_when_unlocked and locked)
+
+
 class NullTtsProvider:
     """No audio device: records what would have been spoken (tests, headless)."""
 

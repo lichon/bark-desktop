@@ -14,7 +14,13 @@ from __future__ import annotations
 import logging
 import sys
 
-from .base import DEFAULT_TTS_PROVIDER, TTS_PROVIDERS, NullTtsProvider, TtsProvider
+from .base import (
+    DEFAULT_TTS_PROVIDER,
+    TTS_PROVIDERS,
+    NullTtsProvider,
+    TtsProvider,
+    should_speak,
+)
 from .speech import DEFAULT_TTS_MAX_CHARS, HIDDEN_PREVIEW_SPEECH, speech_text
 from .worker import ThreadedTtsProvider
 
@@ -78,5 +84,6 @@ __all__ = [
     "ThreadedTtsProvider",
     "build_tts_provider",
     "normalize_provider",
+    "should_speak",
     "speech_text",
 ]

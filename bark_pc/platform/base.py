@@ -66,6 +66,15 @@ class SingleInstance(Protocol):
 
 
 @runtime_checkable
+class SessionState(Protocol):
+    """Report whether the interactive desktop is locked (screen locked)."""
+
+    name: str
+
+    def is_locked(self) -> bool: ...
+
+
+@runtime_checkable
 class Opener(Protocol):
     def open_url(self, url: str) -> bool: ...
 

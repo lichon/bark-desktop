@@ -1,0 +1,40 @@
+# Normalise all text files to LF in the repository and in the working tree,
+# regardless of the platform a contributor is on (core.autocrlf is irrelevant).
+* text=auto eol=lf
+
+# Explicit: source, docs and config are always LF.
+*.py    text eol=lf
+*.md    text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.spec  text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# Windows-only scripts (none currently) must keep CRLF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binary assets — never diffed, never line-ending converted.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.icns  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.pdf   binary
+*.zip   binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.dylib binary

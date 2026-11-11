@@ -30,13 +30,15 @@ The shared layers are OS-agnostic and are tested headlessly on every platform
 (`windows_only` tests are skipped elsewhere), but there is no supported way to
 run the full app on macOS or Linux yet: the composition root still imports the
 Windows backend. Windows is therefore the reference backend and the only
-platform with packaged builds today.
+platform with a runnable packaged build today. The packaging script itself is
+platform-aware (see [Packaged builds](#packaged-builds)), so each host produces
+its own artifact as soon as the matching backend lands.
 
 ## Quick start (Windows)
 
-1. Unpack `BarkDesktopClient.zip` anywhere you can write to (for example
-   `%LOCALAPPDATA%\Programs\BarkDesktopClient`).
-2. Run `bark_pc.exe`. The first launch opens the setup wizard; later launches
+1. Unpack `BarkDesktopClient-windows-x64.zip` anywhere you can write to (for
+   example `%LOCALAPPDATA%\Programs\BarkDesktopClient`).
+2. Run `bark.exe`. The first launch opens the setup wizard; later launches
    open the History window. The tray icon appears either way.
 3. Choose the Bark server:
    * **Public server** — `https://api.day.app` (default), or
@@ -265,7 +267,9 @@ images/  logs/
 On first launch a legacy `data\` folder next to the executable is moved there
 automatically (existing application-data content is never overwritten). For a
 fully portable layout set `BARK_PC_HOME` — data then stays next to the exe in
-`data\`. Set `BARK_PC_DATA` to use a different data folder.
+`data\`. Set `BARK_PC_DATA` to use a different data folder. In a macOS `.app`
+bundle the executable lives inside `Contents/MacOS`, so set `BARK_PC_HOME` to a
+folder next to the `.app` when you want data to travel with the bundle.
 
 ## Privacy
 
@@ -336,6 +340,35 @@ python3.11 -m venv .venv
 The test suite is headless and platform-tagged (`windows_only`), so the shared
 layers can be exercised on macOS and Linux while the platform backends are
 built.
+
+## Packaged builds
+
+The portable build script selects the platform, tray backend, icon format and
+archive type for the host, so the command is the same everywhere:
+
+```bash
+python -m bark_pc.tools.build_portable          # build + archive
+python -m bark_pc.tools.build_portable --no-zip # folder only, no archive
+python -m bark_pc.tools.build_portable --target windows --archive zip
+```
+
+| Host | Bundle in `dist/` | Archive |
+|------|-------------------|---------|
+| Windows | `BarkDesktopClient/` (contains `bark.exe`) | `BarkDesktopClient-windows-<arch>.zip` |
+| macOS | `BarkDesktopClient.app` | `BarkDesktopClient-macos-<arch>.tar.gz` |
+| Linux | `BarkDesktopClient/` (contains `bark`) | `BarkDesktopClient-linux-<arch>.tar.gz` |
+
+`<arch>` is `x64`, `arm64` or `x86`. POSIX archives are tar so executable bits
+and symlinks survive; Windows uses zip so Explorer can unpack it. `--archive`
+accepts `auto`, `zip`, `tar.gz` or `none`. PyInstaller cannot cross-compile, so
+`--target` must match the host; it exists for CI to assert what it is building.
+Every bundle contains `NOTICE`, `README.md` and `docs/quickstart.md` (inside
+`Contents/Resources/` for the macOS `.app`).
+
+On macOS and Linux the bundle currently contains the shared layers plus the
+platform-neutral pystray/Tk code, and the build prints a warning that the native
+notification/secret/autostart backend is still missing. Only the Windows build
+starts end to end today.
 
 Layout: `bark_pc/core` (config, models, SQLite repository, logging), `bark_pc/push`
 (APNs adapter, supervisor, payload parsing, identity cache), `bark_pc/bark`

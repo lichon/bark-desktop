@@ -106,10 +106,18 @@ Expected: working set under 150 MB, average CPU under 1% over the hour, unread b
 ## 9. Portable build check
 
 ```bash
-.venv\Scripts\python bark_pc\tools\build_portable.py
+python -m bark_pc.tools.build_portable
 ```
 
-Expected: `dist/BarkDesktopClient/` contains `bark.exe` and `_internal/`; zipping and unpacking to a clean folder on a machine without Python still starts, activates, registers, and receives a push. Verify license notices are present for pypush (SSPL), pystray (LGPL-3.0), Pillow, and windows-toasts.
+Expected on Windows: `dist/BarkDesktopClient/` contains `bark.exe` and
+`_internal/`, and the script writes `dist/BarkDesktopClient-windows-<arch>.zip`;
+zipping and unpacking to a clean folder on a machine without Python still
+starts, activates, registers, and receives a push. Verify license notices are
+present for pypush (SSPL), pystray (LGPL-3.0), Pillow, and windows-toasts.
+
+On macOS the same command produces `dist/BarkDesktopClient.app` and a `.tar.gz`;
+on Linux it produces the onedir folder and a `.tar.gz`. Those archives are only
+smoke checks until the platform backend is implemented and will not start yet.
 
 ## 10. Failure-path checks
 

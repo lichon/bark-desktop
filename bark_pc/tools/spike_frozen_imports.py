@@ -1,8 +1,9 @@
 """Spike T2 — frozen-import smoke test.
 
-Run from inside the PyInstaller onedir build (or as `python -m
-bark_pc.tools.spike_frozen_imports`) to prove that `pypush`, `winrt.*`,
-`pystray`, Tk and Pillow are all importable without a network install.
+Run from inside the PyInstaller build (or as `python -m
+bark_pc.tools.spike_frozen_imports`) to prove that `pypush`, `pystray`, Tk and
+Pillow are importable without a network install.  Windows also checks the
+WinRT and windows-toasts names that the toast backend imports dynamically.
 The outcome is appended to `docs/validation/spike_T2.md`.
 """
 
@@ -12,18 +13,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-MODULES = [
+from .build_portable import detect_target
+
+COMMON_MODULES = [
     "tkinter",
     "tkinter.ttk",
     "PIL",
     "PIL.ImageTk",
     "pystray",
-    "pystray._win32",
-    "windows_toasts",
-    "winrt.windows.ui.notifications",
-    "winrt.windows.foundation",
-    "winrt.windows.foundation.collections",
-    "winrt.windows.data.xml.dom",
     "segno",
     "httpx",
     "anyio",
@@ -32,6 +29,26 @@ MODULES = [
     "pypush",
     "pypush.apns",
 ]
+
+WINDOWS_MODULES = [
+    "pystray._win32",
+    "windows_toasts",
+    "winrt.windows.ui.notifications",
+    "winrt.windows.foundation",
+    "winrt.windows.foundation.collections",
+    "winrt.windows.data.xml.dom",
+]
+
+
+def modules_for(target) -> list[str]:
+    """The runtime modules that must resolve inside *target*'s bundle."""
+    modules = list(COMMON_MODULES)
+    if target.key == "windows":
+        modules += WINDOWS_MODULES
+    return modules
+
+
+MODULES = modules_for(detect_target())
 
 
 def main(argv: list[str] | None = None) -> int:

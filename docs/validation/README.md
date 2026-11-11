@@ -27,6 +27,7 @@ development container.
 
 * Windows 11, Python 3.11.2 (64-bit), `pypush==2.0.2`, Pillow 13.0.0,
   pystray 0.19.5, windows-toasts 1.3.1, PyInstaller 6.22.3.
-* Unit suite: `python -m pytest` — 303 tests, headless, offline.
+* Unit suite: `python -m pytest` — 405 tests, headless, offline.
 * Portable build: `python -m bark_pc.tools.build_portable` →
-  `dist/BarkDesktopClient/` (59 MB) + `dist/BarkDesktopClient.zip` (28 MB).
+  `dist/BarkDesktopClient/` (59 MB) + `dist/BarkDesktopClient-windows-x64.zip`
+  (28 MB).

@@ -148,10 +148,12 @@ pushes through the Bark server, never into the room, so one test never shows up
 twice. The history window's bottom compose bar sends a one-line message this
 machine writes; *Settings → Message route* chooses the route (the Realtime room,
 a Bark URL, or both, see below). Its *Send* button is enabled while at least one
-selected route is usable, and Enter sends. The button wears the tray icon's
-colours: blue (the icon's online ring) while a message can go out, grey (the
-icon's offline ring) and disabled while it cannot. When the Realtime route is
-used, the app's own frame goes out with this machine's host name as `sender`
+selected route is usable — or while this device still has its own device key to
+fall back to (see *Routing self messages* below) — and Enter sends. The button
+wears the tray icon's colours: blue (the icon's online ring) while a message can
+be sent, grey (the icon's offline ring) and disabled while it cannot. When the
+Realtime route is used, the app's own frame goes out with this machine's host
+name as `sender`
 (the name a room's other participants see), and the id of every message it
 publishes is remembered for a few minutes. The app's own receiver sees that
 broadcast too, but recognises it by that id — not by the `sender` label, which
@@ -174,6 +176,17 @@ they go:
 | Supabase Realtime room (default) | Realtime enabled and joined | Broadcasts the line into the room, as described above. |
 | Bark URL | a Bark push URL | POSTs the line to that URL as a normal Bark push. |
 | Both | either one | Uses every route that is currently available. |
+| *nothing usable* | a linked device key | Pushes the line to this device's own device key, so the compose bar works before any route is configured. |
+
+The selected route is always tried first. When it cannot deliver — the default
+Realtime room is off and no Bark URL was entered, or the chosen route is
+temporarily unavailable — the message is pushed straight to this device through
+the device key registered during setup, exactly like a normal Bark push to
+`https://api.day.app/<device_key>`. That makes "send to self" the out-of-the-box
+behaviour: leaving *Bark URL* empty is valid and simply selects this fallback.
+Only a machine with neither a usable route nor a device key (an install that
+never linked a server, or one linked through Supabase only) keeps *Send*
+disabled.
 
 The Bark URL is the full push URL of the target device, device key included —
 for example `https://api.day.app/<device_key>` or a self-hosted equivalent such

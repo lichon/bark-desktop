@@ -174,6 +174,12 @@ class SettingsDialog:
             style="Muted.TLabel",
         ).pack(side="left")
 
+        ttk.Label(
+            tab,
+            text="Leave it empty to push to this device's own device key.",
+            style="Muted.TLabel",
+        ).grid(row=9, column=0, columnspan=2, sticky="w")
+
         tab.columnconfigure(1, weight=1)
 
     def _build_notifications_tab(self, tab: ttk.Frame) -> None:
@@ -444,15 +450,6 @@ class SettingsDialog:
                 parent=self.window,
             )
             return
-        if candidate["message_route"] in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH):
-            if not candidate["message_route_url"]:
-                messagebox.showerror(
-                    "Invalid setting",
-                    "Enter the Bark URL that self messages should use "
-                    "(for example https://api.day.app/<device_key>).",
-                    parent=self.window,
-                )
-                return
         validated = Settings.from_dict(
             {**self.settings.to_dict(), **candidate, "warnings": []}, None
         )

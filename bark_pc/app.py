@@ -1308,33 +1308,35 @@ class BarkApp:
     def is_supabase_connected(self) -> bool:
         """True while the optional Realtime receiver is active.
 
-        `can_send_message` combines this with the configured self-message route,
-        so the compose bar's Send button stays disabled until a route can send.
+        `_message_targets` combines this with the configured self-message route
+        and the device-key fallback, so the compose bar's Send button is only
+        disabled when nothing at all can deliver a message.
         """
         return self._transport_status.get("supabase") == PushStatus.ACTIVE
 
-    def can_send_message(self) -> bool:
-        """True when the configured self-message route can take a message."""
-        route = self.settings.message_route
-        if route in (MESSAGE_ROUTE_REALTIME, MESSAGE_ROUTE_BOTH):
-            if self.is_supabase_connected() and self._supabase_config() is not None:
-                return True
-        if route in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH):
-            if (self.settings.message_route_url or "").strip():
-                return True
-        return False
+    def _self_push_url(self) -> str:
+        """The push URL of this very device, or "" when there is none.
 
-    def send_message(self, text: str) -> bool:
-        """Send a message this machine wrote through the configured route.
-
-        *Realtime room* keeps the previous behaviour; *Bark URL* POSTs to the
-        configured Bark push URL (no Supabase connection needed); *Both* uses
-        whichever of the two is available.  Network work happens on a worker
-        thread so the compose bar never blocks.
+        This is the device key registered during setup, turned into a normal
+        Bark push URL, and it only counts while the link is still trustworthy
+        (`linked` or `stale`).  It is what "send to self" falls back to when no
+        *Message send* route has been configured, and it is skipped for
+        Supabase links, whose server address is not a Bark server.
         """
-        text = (text or "").strip()
-        if not text:
-            return False
+        link = self.db.get_link()
+        if link is None or link.is_supabase or not link.is_usable:
+            return ""
+        return link.push_url
+
+    def _message_targets(self) -> tuple[tuple[str, str, str] | None, str, bool]:
+        """Resolve where a self message goes right now.
+
+        Returns the Realtime config (or ``None``), a Bark push URL (or ``""``)
+        and whether that URL is the device-key fallback.  The configured route
+        wins; when it cannot deliver, the message still goes to this device
+        through its own device key, so an install that never touched *Message
+        send* can send messages too.
+        """
         route = self.settings.message_route
         realtime_config = None
         if route in (MESSAGE_ROUTE_REALTIME, MESSAGE_ROUTE_BOTH):
@@ -1344,10 +1346,39 @@ class BarkApp:
         if route in (MESSAGE_ROUTE_BARK, MESSAGE_ROUTE_BOTH):
             bark_url = (self.settings.message_route_url or "").strip()
         if realtime_config is None and not bark_url:
+            bark_url = self._self_push_url()
+            return realtime_config, bark_url, bool(bark_url)
+        return realtime_config, bark_url, False
+
+    def can_send_message(self) -> bool:
+        """True when a compose-bar message can leave this machine somehow."""
+        realtime_config, bark_url, _fallback = self._message_targets()
+        return bool(realtime_config or bark_url)
+
+    def send_message(self, text: str) -> bool:
+        """Send a message this machine wrote through the configured route.
+
+        *Realtime room* keeps the previous behaviour; *Bark URL* POSTs to the
+        configured Bark push URL (no Supabase connection needed); *Both* uses
+        whichever of the two is available.  When the route cannot deliver, the
+        message is pushed to this device's own device key instead.  Network
+        work happens on a worker thread so the compose bar never blocks.
+        """
+        text = (text or "").strip()
+        if not text:
+            return False
+        realtime_config, bark_url, fallback = self._message_targets()
+        if realtime_config is None and not bark_url:
             self.log.warning(
-                "cannot send self message: the %s route is not available", route
+                "cannot send self message: the %s route is not available and "
+                "this device has no push URL",
+                self.settings.message_route,
             )
             return False
+        if fallback:
+            self.log.info(
+                "no message route configured; sending the message to this device"
+            )
         threading.Thread(
             target=self._publish_self_message,
             args=(text, realtime_config, bark_url),

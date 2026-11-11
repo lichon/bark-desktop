@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -72,10 +76,90 @@ _CONTROL_EVENTS = frozenset(
 )
 _MESSAGE_EVENTS = frozenset({"message", "event", "broadcast"})
 
-# The `sender` of the desktop's own broadcasts (also used as the toast title).
-# Frames carrying this sender are the client's own messages: they are stored as
-# read and never toasted or spoken.
-DEFAULT_SENDER = "Bark Desktop"
+# Fallback `sender` label when the host name cannot be read.  Own messages are
+# recognised by their message id (see `_sent_ids`), never by this label, so a
+# room where someone else is also called this does not confuse the client.
+FALLBACK_SENDER = "Bark Desktop"
+
+# How long a published message id counts as "ours", and how many ids to keep.
+SENT_ID_TTL_S = 300.0
+SENT_ID_MAX = 512
+
+
+def default_sender() -> str:
+    """The `sender` label of broadcasts from this machine: its host name."""
+    try:
+        name = socket.gethostname().strip()
+    except OSError:  # pragma: no cover - hostname lookup failure
+        name = ""
+    return name or FALLBACK_SENDER
+
+
+class RecentSentIds:
+    """Ids of the broadcasts this process published recently.
+
+    Publishing uses a short-lived connection while the streaming receiver holds
+    another one, and Realtime echoes a broadcast back to every connection in the
+    room — including our own.  Remembering the ids we sent is how the receiver
+    tells our frames apart from everyone else's; the `sender` label is just a
+    display name and cannot be trusted for that.  Entries expire after `ttl`
+    seconds and the set is bounded, so it cannot grow without limit.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl: float = SENT_ID_TTL_S,
+        maxsize: int = SENT_ID_MAX,
+        clock=time.monotonic,
+    ):
+        self.ttl = max(1.0, float(ttl))
+        self.maxsize = max(1, int(maxsize))
+        self._clock = clock
+        self._ids: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def remember(self, message_id: str | None) -> None:
+        text = (message_id or "").strip()
+        if not text:
+            return
+        now = self._clock()
+        with self._lock:
+            self._purge(now)
+            self._ids[text] = now
+            self._ids.move_to_end(text)
+            while len(self._ids) > self.maxsize:
+                self._ids.popitem(last=False)
+
+    def __contains__(self, message_id: object) -> bool:
+        if not isinstance(message_id, str):
+            return False
+        text = message_id.strip()
+        if not text:
+            return False
+        now = self._clock()
+        with self._lock:
+            self._purge(now)
+            return text in self._ids
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._purge(self._clock())
+            return len(self._ids)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._ids.clear()
+
+    def _purge(self, now: float) -> None:
+        while self._ids:
+            _, seen_at = next(iter(self._ids.items()))
+            if now - seen_at <= self.ttl:
+                return
+            self._ids.popitem(last=False)
+
+
+_sent_ids = RecentSentIds()
 
 
 # --------------------------------------------------------------------------- #
@@ -222,7 +306,7 @@ def _bark_payload(content, envelope: dict | None = None, room: str | None = None
             payload.setdefault("sender", sender)
             _apply_sender_title(payload, sender)
     _apply_room_group(payload, room)
-    if str(payload.get("sender") or "").strip() == DEFAULT_SENDER:
+    if payload.get("id") in _sent_ids:
         # Our own broadcast: flag it so ingest stores it read and stays silent.
         payload[SELF_FIELD] = "1"
     return _json_bytes(payload)
@@ -539,28 +623,35 @@ class SupabaseRealtimeReceiver:
         *,
         event: str = "message",
         room_name: str | None = None,
-        sender: str = DEFAULT_SENDER,
+        sender: str | None = None,
     ) -> None:
-        """Broadcast one message into the room (used by the self-test).
+        """Broadcast one message into the room (used by the self-test/
 
         The frame is a `ChannelMessage` exactly as `use-supabase.ts` builds it
         (`newMessage`): `{id, type, content, timestamp, sender}`.  `content` is
         the payload's alert text as a plain string — the room carries the
         message, not a push envelope — and `sender` becomes its title on the
-        receiving side.
+        receiving side.  It defaults to this machine's host name.
+
+        The generated message id is remembered as ours; the receiving side uses
+        that set, not the sender label, to recognise the echo of this frame.
         """
         content = _content_text(payload)
         if not content:
             logger.debug("supabase: not publishing a payload without alert text")
             return
         room = (room_name or self.room_name).strip() or self.room_name
+        message_id = uuid.uuid4().hex
         message = {
-            "id": uuid.uuid4().hex,
+            "id": message_id,
             "type": "message",
             "content": content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "sender": (sender or "").strip() or DEFAULT_SENDER,
+            "sender": (sender or "").strip() or default_sender(),
         }
+        # Remember before sending: the echo can arrive on the streaming
+        # connection while this frame is still in flight.
+        _sent_ids.remember(message_id)
         try:
             async with self._connection() as ws:
                 join_ref, _buffered = await self._join(ws, room)
@@ -607,7 +698,7 @@ def publish_bark_payload(
     room_name: str,
     payload: dict,
     *,
-    sender: str = DEFAULT_SENDER,
+    sender: str | None = None,
     timeout: float = JOIN_TIMEOUT_S,
     connect=None,
 ) -> None:

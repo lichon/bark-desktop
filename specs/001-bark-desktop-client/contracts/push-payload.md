@@ -44,7 +44,7 @@ Server behavior to rely on:
 | `icon` | URL string | `image_url` | Non-`http(s)` values are ignored |
 | `id` | string | `remote_id` | Also the de-duplication key; delete pushes reference it |
 | `delete` | `"1"` | — | Removes the notification with matching `remote_id` |
-| `bark_desktop_self` | `"1"` | `from_self` | Internal marker the Supabase transport adds to broadcasts this desktop sent; such rows are stored read, not toasted, not spoken |
+| `bark_desktop_self` | `"1"` | `from_self` | Internal marker the Supabase transport adds when a broadcast's `id` is one this process published recently; such rows are stored read, not toasted, not spoken |
 | `level` | string | `level` | `active` / `timeSensitive` / `passive` / `critical`; stored only |
 | `badge` | numeric string | — | Ignored (no desktop badge equivalent) |
 | `sound` | string | — | Ignored (toast sound default) |

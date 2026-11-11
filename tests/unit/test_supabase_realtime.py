@@ -21,8 +21,10 @@ from bark_pc.core.config import (
 from bark_pc.core.errors import CourierRejected, LinkInvalid, StreamLost
 from bark_pc.core.models import LinkState, PushStatus
 from bark_pc.push.supabase_realtime import (
+    RecentSentIds,
     SupabaseRealtimeReceiver,
     channel_topic,
+    default_sender,
     payload_from_broadcast,
     publish_bark_payload,
     realtime_ws_url,
@@ -334,7 +336,7 @@ def test_publish_uses_the_supabase_broadcast_envelope():
     assert isinstance(message["content"], str)
     assert message["content"] == "B"
     assert message["type"] == "message"
-    assert message["sender"] == "Bark Desktop"
+    assert message["sender"] == default_sender()
     assert isinstance(message["id"], str) and message["id"]
     assert message["timestamp"].endswith("+00:00")
 
@@ -361,10 +363,12 @@ def test_published_sender_becomes_the_title_on_the_receiving_side():
     bark = json.loads(payload_from_broadcast("message", message, room=ROOM))
     assert bark["aps"]["alert"] == {
         "body": "Test notification",
-        "title": "Bark Desktop",
+        "title": message["sender"],
     }
     assert bark["id"] == message["id"]
     assert bark["group"] == ROOM
+    # The published id is remembered, so the echo is recognised as ours.
+    assert bark["bark_desktop_self"] == "1"
 
 
 def test_publish_accepts_a_custom_sender():
@@ -492,12 +496,45 @@ def test_supabase_registration_requires_the_short_form_and_a_key(db):
 
 
 def test_own_broadcast_is_flagged_as_self_and_others_are_not():
-    own = payload_from_broadcast(
-        "message", {"id": "mine", "sender": "Bark Desktop", "content": "hi"}
+    ws = FakeWebSocket([])
+    receiver = SupabaseRealtimeReceiver(
+        server_url=SUPABASE,
+        auth_key=KEY,
+        room_name=ROOM,
+        connect=connect_to(ws),
+        publish_settle=0,
     )
+
+    anyio.run(receiver.publish, {"aps": {"alert": {"body": "hi"}}})
+    message = ws.sent[-1]["payload"]["payload"]
+    own = payload_from_broadcast("message", message)
     assert json.loads(own)["bark_desktop_self"] == "1"
 
     other = payload_from_broadcast(
         "message", {"id": "theirs", "sender": "Ana", "content": "hi"}
     )
     assert "bark_desktop_self" not in json.loads(other)
+
+
+def test_a_frame_with_our_host_name_but_an_unknown_id_is_not_ours():
+    # The sender label is a display name only; another client may use it too.
+    frame = {"id": "someone-else", "sender": default_sender(), "content": "hi"}
+    bark = json.loads(payload_from_broadcast("message", frame))
+    assert "bark_desktop_self" not in bark
+
+
+def test_recent_sent_ids_expire_and_stay_bounded():
+    now = [0.0]
+    ids = RecentSentIds(ttl=10, maxsize=3, clock=lambda: now[0])
+
+    ids.remember("a")
+    ids.remember("b")
+    assert "a" in ids and "b" in ids
+
+    now[0] = 11.0
+    assert "a" not in ids and len(ids) == 0
+
+    for name in ("a", "b", "c", "d"):
+        ids.remember(name)
+    assert "a" not in ids
+    assert "d" in ids and len(ids) == 3

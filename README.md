@@ -121,10 +121,13 @@ twice. The history window's bottom compose bar broadcasts a one-line message
 into the room: its *Send* button is enabled only while the Realtime transport is
 connected, and Enter sends. The button wears the tray icon's colours: blue (the
 icon's online ring) while the room is joined, grey (the icon's offline ring) and
-disabled while it is not. The app's own receiver sees that broadcast too, but
-recognises it as its own message (the broadcast `sender` is the desktop): it is
-stored in the history **already read**, and no toast is shown and no speech is
-spoken for it. Messages from every other sender behave as usual.
+disabled while it is not. The app's own frame goes out with this machine's
+host name as `sender` (the name a room's other participants see), and the id of
+every message it publishes is remembered for a few minutes. The app's own
+receiver sees that broadcast too, but recognises it by that id — not by the
+`sender` label, which anyone can reuse — so it is stored in the history
+**already read**, and no toast is shown and no speech is spoken for it. Messages
+from every other sender behave as usual.
 
 Nothing Apple-specific happens for the Realtime side: it reuses the device
 activation performed for the Bark server, and toggling it never re-registers

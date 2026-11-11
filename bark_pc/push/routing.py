@@ -9,7 +9,10 @@ contains `prod` go to this Slack webhook".  Rules are deliberately simple:
 * **title** is a case-insensitive substring of the displayed title (``title``
   plus ``subtitle``).  An empty value matches every message.
 * a rule fires when *all* of its non-empty conditions match, and the matching
-  notification is POSTed (or PUT/PATCHed) to the webhook URL as JSON.
+  notification is POSTed (or PUT/PATCHed) to the webhook URL with a body the
+  user wrote as a JSON or form template.  ``{placeholder}`` names inside the
+  body are replaced with the notification's fields, so message text is only
+  sent when the template asks for it.
 
 Delivery happens on a small daemon worker so a slow webhook can never delay
 ingest or a toast.  Failures are logged and dropped: routing is best-effort and
@@ -27,7 +30,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 
 import httpx
 
@@ -46,25 +49,37 @@ MAX_HEADER_NAME_LENGTH = 80
 MAX_HEADER_VALUE_LENGTH = 2048
 WEBHOOK_METHODS = ("GET", "POST", "PUT", "PATCH")
 DEFAULT_WEBHOOK_METHOD = "GET"
-CONTENT_MODE_NONE = "none"
-CONTENT_MODE_TITLE = "title"
-CONTENT_MODE_BODY = "body"
-CONTENT_MODE_FULL = "full"
-CONTENT_MODES = (
-    CONTENT_MODE_NONE,
-    CONTENT_MODE_TITLE,
-    CONTENT_MODE_BODY,
-    CONTENT_MODE_FULL,
-)
-DEFAULT_CONTENT_MODE = CONTENT_MODE_NONE
-CONTENT_MODE_LABELS = {
-    CONTENT_MODE_NONE: "No message content",
-    CONTENT_MODE_TITLE: "Title only",
-    CONTENT_MODE_BODY: "Title and body",
-    CONTENT_MODE_FULL: "Title, body and raw payload",
+BODY_FORMAT_JSON = "json"
+BODY_FORMAT_FORM = "form"
+BODY_FORMATS = (BODY_FORMAT_JSON, BODY_FORMAT_FORM)
+DEFAULT_BODY_FORMAT = BODY_FORMAT_JSON
+BODY_FORMAT_LABELS = {
+    BODY_FORMAT_JSON: "JSON",
+    BODY_FORMAT_FORM: "Form (x-www-form-urlencoded)",
 }
-CONTENT_LABEL_TO_MODE = {
-    label: mode for mode, label in CONTENT_MODE_LABELS.items()
+BODY_LABEL_TO_FORMAT = {label: fmt for fmt, label in BODY_FORMAT_LABELS.items()}
+BODY_CONTENT_TYPES = {
+    BODY_FORMAT_JSON: "application/json",
+    BODY_FORMAT_FORM: "application/x-www-form-urlencoded",
+}
+MAX_BODY_LENGTH = 16384
+# Bodies written before the body editor existed stored a content mode instead;
+# they are migrated to the equivalent JSON template when loaded.
+LEGACY_CONTENT_BODIES = {
+    "none": "",
+    "title": (
+        '{"title": "{title}", "subtitle": "{subtitle}", '
+        '"display_title": "{display_title}"}'
+    ),
+    "body": (
+        '{"title": "{title}", "subtitle": "{subtitle}", '
+        '"display_title": "{display_title}", "body": "{body}"}'
+    ),
+    "full": (
+        '{"title": "{title}", "subtitle": "{subtitle}", '
+        '"display_title": "{display_title}", "body": "{body}", '
+        '"payload": {payload}}'
+    ),
 }
 WEBHOOK_TIMEOUT_S = 10.0
 WEBHOOK_QUEUE_SIZE = 256
@@ -82,7 +97,10 @@ URL_PLACEHOLDERS = (
     "received_at",
     "received_at_iso",
 )
-_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+BODY_PLACEHOLDERS = URL_PLACEHOLDERS + ("payload",)
+# Only identifier-shaped names are placeholders, so the braces of a JSON object
+# (``{"title": ...}``) are never mistaken for one.
+_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
@@ -101,7 +119,8 @@ class WebhookRoute:
     title: str = ""
     url: str = ""
     method: str = DEFAULT_WEBHOOK_METHOD
-    content: str = DEFAULT_CONTENT_MODE
+    body_format: str = DEFAULT_BODY_FORMAT
+    body: str = ""
     headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -131,9 +150,15 @@ class WebhookRoute:
         raw_method = str(data.get("method") or DEFAULT_WEBHOOK_METHOD).strip().upper()
         if raw_method not in WEBHOOK_METHODS:
             raise ValueError("method must be " + ", ".join(WEBHOOK_METHODS))
-        raw_content = str(data.get("content") or DEFAULT_CONTENT_MODE).strip().lower()
-        if raw_content not in CONTENT_MODES:
-            raise ValueError("content must be " + ", ".join(CONTENT_MODES))
+        raw_format = str(data.get("body_format") or DEFAULT_BODY_FORMAT).strip().lower()
+        if raw_format not in BODY_FORMATS:
+            raise ValueError("body format must be " + ", ".join(BODY_FORMATS))
+        raw_body = data.get("body")
+        if raw_body is None:
+            raw_body = LEGACY_CONTENT_BODIES.get(
+                str(data.get("content") or "none").strip().lower(), ""
+            )
+        body = validate_body(str(raw_body), raw_format)
         url = validate_webhook_url(str(data.get("url") or ""))
         validate_webhook_placeholders(url)
         return cls(
@@ -144,7 +169,8 @@ class WebhookRoute:
             title=raw_title,
             url=url,
             method=raw_method,
-            content=raw_content,
+            body_format=raw_format,
+            body=body,
             headers=validate_headers(data.get("headers") or {}),
         )
 
@@ -157,7 +183,8 @@ class WebhookRoute:
             "title": self.title,
             "url": self.url,
             "method": self.method,
-            "content": self.content,
+            "body_format": self.body_format,
+            "body": self.body,
             "headers": dict(self.headers),
         }
 
@@ -171,6 +198,11 @@ class WebhookRoute:
             return urlsplit(self.url).netloc or self.url
         except ValueError:  # pragma: no cover - validate_webhook_url prevents this
             return self.url
+
+    @property
+    def sends_body(self) -> bool:
+        """GET never carries a body; the other methods send the template."""
+        return self.method != "GET" and bool((self.body or "").strip())
 
     @property
     def match_summary(self) -> str:
@@ -369,37 +401,115 @@ def _received_at_iso(timestamp_ms: int | None) -> str | None:
     return moment.isoformat()
 
 
-def webhook_payload(notification: Notification, route: WebhookRoute) -> dict:
-    """The JSON document sent to POST/PUT/PATCH webhooks.
-
-    Message text is private by default: only metadata is sent unless the route
-    opts into a content mode.  ``title``/``subtitle`` arrive with the *title*
-    mode, the body with *body*, and the original custom payload with *full*.
-    """
-    raw = _raw_payload(notification)
-    payload = {
-        "event": "bark.notification",
-        "route": {"id": route.id, "name": route.name},
+def _body_values(notification: Notification) -> dict:
+    return {
         "id": notification.id,
         "remote_id": notification.remote_id,
         "group": notification.group_name,
+        "title": notification.title,
+        "subtitle": notification.subtitle,
+        "display_title": notification.display_title,
+        "body": notification.body,
         "url": notification.url,
         "image_url": notification.image_url,
         "source": notification.source_server,
         "received_at": notification.received_at,
         "received_at_iso": _received_at_iso(notification.received_at),
+        "payload": _raw_payload(notification),
     }
-    if route.content in (CONTENT_MODE_TITLE, CONTENT_MODE_BODY, CONTENT_MODE_FULL):
-        payload.update(
-            title=notification.title,
-            subtitle=notification.subtitle,
-            display_title=notification.display_title,
-        )
-    if route.content in (CONTENT_MODE_BODY, CONTENT_MODE_FULL):
-        payload["body"] = notification.body
-    if route.content == CONTENT_MODE_FULL:
-        payload["payload"] = raw
-    return payload
+
+
+# All-text values so a JSON template that forgets the quotes around a
+# placeholder is rejected when the rule is saved, not when a message arrives.
+# ``received_at`` stays numeric and ``payload`` stays an object, which is how
+# the bare ``{received_at}`` / ``{payload}`` placeholders are meant to be used.
+_VALIDATION_BODY_VALUES = {
+    "id": 1,
+    "remote_id": "x",
+    "group": "x",
+    "title": "x",
+    "subtitle": "x",
+    "display_title": "x",
+    "body": "x",
+    "url": "https://example.com/x",
+    "image_url": "https://example.com/x.png",
+    "source": "x",
+    "received_at": 1,
+    "received_at_iso": "1970-01-01T00:00:00+00:00",
+    "payload": {"x": 1},
+}
+
+
+def _json_placeholder(value) -> str:
+    """Insert *value* into a JSON template.
+
+    Text is escaped but left unquoted so it can sit inside a JSON string
+    (``"{title}"``); ``None`` becomes ``null``; a payload object is inserted as
+    raw JSON so ``{payload}`` must stand outside quotes.
+    """
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if value is None:
+        return "null"
+    return json.dumps(str(value), ensure_ascii=False)[1:-1]
+
+
+def _form_placeholder(value) -> str:
+    if isinstance(value, dict):
+        value = json.dumps(value, ensure_ascii=False)
+    return quote_plus("" if value is None else str(value))
+
+
+def _render_body(template: str, body_format: str, values: dict) -> str:
+    encoder = (
+        _json_placeholder if body_format == BODY_FORMAT_JSON else _form_placeholder
+    )
+
+    def replace(match: re.Match) -> str:
+        return encoder(values.get(match.group(1).casefold()))
+
+    return _PLACEHOLDER.sub(replace, template or "")
+
+
+def validate_body(raw: str, body_format: str = DEFAULT_BODY_FORMAT) -> str:
+    """Validate a body template for *body_format* (``json`` or ``form``)."""
+    if body_format not in BODY_FORMATS:
+        raise ValueError("body format must be " + ", ".join(BODY_FORMATS))
+    text = raw or ""
+    if len(text) > MAX_BODY_LENGTH:
+        raise ValueError(f"body must be at most {MAX_BODY_LENGTH} characters")
+    if "\x00" in text:
+        raise ValueError("body must not contain NUL characters")
+    for name in _PLACEHOLDER.findall(text):
+        if name.casefold() not in BODY_PLACEHOLDERS:
+            supported = ", ".join("{" + item + "}" for item in BODY_PLACEHOLDERS)
+            raise ValueError(
+                f"unknown body placeholder {{{name}}}; "
+                f"supported placeholders: {supported}"
+            )
+    if body_format == BODY_FORMAT_JSON and text.strip():
+        try:
+            json.loads(_render_body(text, body_format, _VALIDATION_BODY_VALUES))
+        except ValueError as exc:
+            raise ValueError(
+                f"body is not valid JSON after placeholders are filled: {exc}"
+            ) from exc
+    return text
+
+
+def render_webhook_body(notification: Notification, route: WebhookRoute) -> str | None:
+    """Fill the rule's body template for *notification*; ``None`` = no body."""
+    if not route.sends_body:
+        return None
+    return _render_body(route.body, route.body_format, _body_values(notification))
+
+
+def webhook_headers(route: WebhookRoute, *, body: bool = True) -> dict[str, str]:
+    """Configured headers plus the template format's Content-Type."""
+    headers = dict(route.headers)
+    if body and not any(name.casefold() == "content-type" for name in headers):
+        headers["Content-Type"] = BODY_CONTENT_TYPES[route.body_format]
+    return headers
 
 
 def validate_webhook_placeholders(url: str) -> None:
@@ -535,18 +645,14 @@ class WebhookDispatcher:
         request_client = client or self._client
         try:
             url = format_webhook_url(notification, route)
-            if route.method == "GET":
-                response = request_client.get(
-                    url,
-                    headers=dict(route.headers),
-                )
-            else:
-                response = request_client.request(
-                    route.method,
-                    url,
-                    json=webhook_payload(notification, route),
-                    headers=dict(route.headers),
-                )
+            body = render_webhook_body(notification, route)
+            headers = webhook_headers(route, body=body is not None)
+            response = request_client.request(
+                route.method,
+                url,
+                headers=headers,
+                content=None if body is None else body.encode("utf-8"),
+            )
         except httpx.TimeoutException as exc:
             self.logger.warning("routing: webhook %s timed out: %s", route.host, exc)
             return None

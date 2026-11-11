@@ -7,10 +7,11 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ..push.routing import (
-    CONTENT_LABEL_TO_MODE,
-    CONTENT_MODE_LABELS,
-    CONTENT_MODES,
-    DEFAULT_CONTENT_MODE,
+    BODY_FORMAT_JSON,
+    BODY_FORMAT_LABELS,
+    BODY_FORMATS,
+    BODY_LABEL_TO_FORMAT,
+    DEFAULT_BODY_FORMAT,
     DEFAULT_WEBHOOK_METHOD,
     MAX_ROUTE_NAME_LENGTH,
     WEBHOOK_METHODS,
@@ -33,7 +34,7 @@ class RoutingDialog:
         self.routes: list[WebhookRoute] = list(route_store.routes)
         self.window = tk.Toplevel(master)
         self.window.title("Bark Desktop Client — Message routing")
-        self.window.minsize(640, 300)
+        self.window.minsize(720, 300)
         if master is not None and master.winfo_viewable():
             self.window.transient(master)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -65,18 +66,20 @@ class RoutingDialog:
 
         table = ttk.Frame(container)
         table.pack(fill="both", expand=True)
-        columns = ("enabled", "match", "method", "url")
+        columns = ("enabled", "match", "method", "body", "url")
         self.tree = ttk.Treeview(
             table, columns=columns, show="headings", selectmode="browse", height=9
         )
         self.tree.heading("enabled", text="On")
         self.tree.heading("match", text="Matches")
         self.tree.heading("method", text="Method")
+        self.tree.heading("body", text="Body")
         self.tree.heading("url", text="Webhook")
         self.tree.column("enabled", width=42, anchor="center", stretch=False)
-        self.tree.column("match", width=250, anchor="w", stretch=False)
+        self.tree.column("match", width=220, anchor="w", stretch=False)
         self.tree.column("method", width=72, anchor="w", stretch=False)
-        self.tree.column("url", width=290, anchor="w")
+        self.tree.column("body", width=110, anchor="w", stretch=False)
+        self.tree.column("url", width=260, anchor="w")
         self.tree.tag_configure("disabled", foreground="#9ca3af")
         scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -129,6 +132,7 @@ class RoutingDialog:
                     "Yes" if route.enabled else "No",
                     route.match_summary,
                     route.method,
+                    self._body_summary(route),
                     route.url,
                 ),
                 tags=() if route.enabled else ("disabled",),
@@ -141,6 +145,12 @@ class RoutingDialog:
             self.status_label.configure(
                 text="No rules yet. Add one to forward incoming messages."
             )
+
+    @staticmethod
+    def _body_summary(route: WebhookRoute) -> str:
+        if not route.sends_body:
+            return "—"
+        return BODY_FORMAT_LABELS.get(route.body_format, route.body_format)
 
     def _selected_index(self) -> int | None:
         selection = self.tree.selection()
@@ -296,23 +306,6 @@ class RuleEditor:
             style="Muted.TLabel",
         ).grid(row=6, column=1, sticky="w")
 
-        ttk.Label(container, text="Message content").grid(
-            row=7, column=0, sticky="w", pady=(6, 0)
-        )
-        self.content_var = tk.StringVar(value=CONTENT_MODE_LABELS[DEFAULT_CONTENT_MODE])
-        ttk.Combobox(
-            container,
-            textvariable=self.content_var,
-            values=[CONTENT_MODE_LABELS[mode] for mode in CONTENT_MODES],
-            state="readonly",
-            width=28,
-        ).grid(row=7, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(
-            container,
-            text="Metadata is always sent; choose how much of the message text to include.",
-            style="Muted.TLabel",
-        ).grid(row=8, column=1, sticky="w")
-
         ttk.Label(container, text="Webhook URL").grid(
             row=9, column=0, sticky="w", pady=(6, 0)
         )
@@ -342,25 +335,65 @@ class RuleEditor:
         ).grid(row=11, column=1, sticky="w", pady=(6, 0))
         ttk.Label(
             container,
-            text="GET sends no body; POST, PUT and PATCH send JSON.",
+            text="GET sends no body; POST, PUT and PATCH send the body below.",
             style="Muted.TLabel",
         ).grid(row=12, column=1, sticky="w")
 
+        ttk.Label(container, text="Body format").grid(
+            row=13, column=0, sticky="w", pady=(6, 0)
+        )
+        self.body_format_var = tk.StringVar(
+            value=BODY_FORMAT_LABELS[DEFAULT_BODY_FORMAT]
+        )
+        body_format = ttk.Combobox(
+            container,
+            textvariable=self.body_format_var,
+            values=[BODY_FORMAT_LABELS[item] for item in BODY_FORMATS],
+            state="readonly",
+            width=28,
+        )
+        body_format.grid(row=13, column=1, sticky="w", pady=(6, 0))
+        body_format.bind("<<ComboboxSelected>>", lambda _event: self._update_body_hint())
+
+        ttk.Label(container, text="Body").grid(
+            row=14, column=0, sticky="nw", pady=(6, 0)
+        )
+        self.body_text = tk.Text(
+            container, width=48, height=5, wrap="none", relief="solid", borderwidth=1
+        )
+        self.body_text.grid(row=14, column=1, sticky="ew", pady=(6, 0))
+        ttk.Label(
+            container,
+            text=(
+                "Placeholders: {title}, {subtitle}, {display_title}, {body}, "
+                "{group}, {url}, {image_url}, {source}, {id}, {remote_id}, "
+                "{received_at}, {received_at_iso}, {payload}. Empty = no body."
+            ),
+            style="Muted.TLabel",
+            wraplength=460,
+            justify="left",
+        ).grid(row=15, column=1, sticky="w")
+        self.body_hint = ttk.Label(
+            container, text="", style="Muted.TLabel", wraplength=460, justify="left"
+        )
+        self.body_hint.grid(row=16, column=1, sticky="w")
+
         ttk.Label(container, text="Headers (optional)").grid(
-            row=13, column=0, sticky="nw", pady=(6, 0)
+            row=17, column=0, sticky="nw", pady=(6, 0)
         )
         self.headers_text = tk.Text(
             container, width=48, height=3, wrap="none", relief="solid", borderwidth=1
         )
-        self.headers_text.grid(row=13, column=1, sticky="ew", pady=(6, 0))
+        self.headers_text.grid(row=17, column=1, sticky="ew", pady=(6, 0))
         ttk.Label(
             container,
             text="One Name: value per line, for example Authorization: Bearer …",
             style="Muted.TLabel",
-        ).grid(row=14, column=1, sticky="w")
+        ).grid(row=18, column=1, sticky="w")
+        self._update_body_hint()
 
         buttons = ttk.Frame(container)
-        buttons.grid(row=15, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=19, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.close).pack(side="right")
         ttk.Button(
             buttons, text="Save rule", style="Accent.TButton", command=self._save
@@ -374,6 +407,23 @@ class RuleEditor:
         y = max(0, (self.window.winfo_screenheight() - height) // 2)
         self.window.geometry(f"{width}x{height}+{x}+{y}")
 
+    def _body_format(self) -> str:
+        return BODY_LABEL_TO_FORMAT.get(self.body_format_var.get(), DEFAULT_BODY_FORMAT)
+
+    def _update_body_hint(self) -> None:
+        if self._body_format() == BODY_FORMAT_JSON:
+            text = (
+                'Example: {"text": "{display_title}: {body}"}. '
+                "Placeholder values are JSON-escaped; the filled body must stay "
+                "valid JSON. Use {payload} without quotes for the raw payload."
+            )
+        else:
+            text = (
+                "Example: text={display_title}&descr={body}. "
+                "Placeholder values are form-encoded."
+            )
+        self.body_hint.configure(text=text)
+
     def _load(self) -> None:
         route = self.route
         if route is None:
@@ -383,13 +433,16 @@ class RuleEditor:
         self.name_var.set(route.name)
         self.group_var.set(route.message_group)
         self.title_var.set(route.title)
-        self.content_var.set(
-            CONTENT_MODE_LABELS.get(route.content, CONTENT_MODE_LABELS[DEFAULT_CONTENT_MODE])
+        self.body_format_var.set(
+            BODY_FORMAT_LABELS.get(route.body_format, BODY_FORMAT_LABELS[DEFAULT_BODY_FORMAT])
         )
+        self.body_text.delete("1.0", "end")
+        self.body_text.insert("1.0", route.body)
         self.url_var.set(route.url)
         self.method_var.set(route.method)
         self.headers_text.delete("1.0", "end")
         self.headers_text.insert("1.0", format_header_lines(route.headers))
+        self._update_body_hint()
 
     def _save(self) -> None:
         try:
@@ -401,9 +454,8 @@ class RuleEditor:
                     "enabled": bool(self.enabled_var.get()),
                     "message_group": self.group_var.get(),
                     "title": self.title_var.get(),
-                    "content": CONTENT_LABEL_TO_MODE.get(
-                        self.content_var.get(), DEFAULT_CONTENT_MODE
-                    ),
+                    "body_format": self._body_format(),
+                    "body": self.body_text.get("1.0", "end").rstrip("\n"),
                     "url": self.url_var.get(),
                     "method": self.method_var.get(),
                     "headers": headers,

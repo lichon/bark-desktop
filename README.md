@@ -206,15 +206,16 @@ still used, and the tray reports which route failed.
 The client can also forward incoming messages to any HTTP webhook. Open
 *Routing…* in the Messages window (next to *Settings*) or tray menu → *Message
 routing…*, add a rule and press *Save*. Every rule has two optional match
-conditions and one URL:
+conditions, a URL and an optional request body:
 
-| Condition | Matches | Empty means |
-|-----------|---------|-------------|
+| Setting | Meaning | Empty means |
+|---------|---------|-------------|
 | Message group | The push's `group` field, or the Supabase room name (case-insensitive) | any message |
 | Title contains | A case-insensitive substring of the title or subtitle | any message |
 | Webhook URL | `http://` or `https://`; may contain `{placeholders}`; custom headers are supported | — |
-| Method | `GET` (default), `POST`, `PUT` or `PATCH`; GET sends no body, the others send the JSON document | `GET` |
-| Message content | `No message content` (default), `Title only`, `Title and body`, or `Title, body and raw payload` | `No message content` |
+| Method | `GET` (default), `POST`, `PUT` or `PATCH`; GET sends no body, the others send the body below | `GET` |
+| Body format | `JSON` (default) or `Form (x-www-form-urlencoded)`; sets the `Content-Type` header unless one is configured | `JSON` |
+| Body | A template with `{placeholders}`; unknown placeholders and JSON that is invalid after filling are rejected on save | no body |
 
 Both conditions must match when both are set. A rule with no conditions is a
 catch-all. Several rules can match the same message; each one receives the
@@ -253,34 +254,42 @@ https://example.com/hook/{group}?title={title}&body={body}
 ```
 
 `GET` (the default) sends a request to that URL with no body. `POST`, `PUT` and
-`PATCH` send the JSON document described below. Message text is **not** included
-automatically in that document: only metadata is sent unless the *Message
-content* setting opts in. This example uses *Title, body and raw payload*:
+`PATCH` send the rule's *Body*, which is a template in the selected format.
+Message text is **not** included automatically: the body is exactly what you
+write, so only the placeholders you use are sent. The same placeholder names
+are available in the body, plus `{payload}` for the sender's raw custom JSON.
+An empty body sends no body at all.
+
+A JSON body must stay valid JSON once the placeholders are filled, and
+placeholder values are escaped for you:
 
 ```json
 {
-  "event": "bark.notification",
-  "route": {"id": "…", "name": "CI"},
-  "id": 42,
-  "remote_id": "c0ffee-uuid",
-  "group": "ops",
-  "url": "https://ci.example.com/build/412",
-  "image_url": null,
-  "source": "api.day.app",
-  "received_at": 1700000000000,
-  "received_at_iso": "2023-11-14T22:13:20+00:00",
-  "title": "Deploy done",
-  "subtitle": "prod",
-  "display_title": "Deploy done — prod",
-  "body": "build 412",
-  "payload": {"type": "deploy", "group": "ops"}
+  "text": "{display_title}: {body}",
+  "group": "{group}",
+  "received_at": {received_at},
+  "payload": {payload},
+  "link": "{url}"
 }
 ```
 
-*Title only* adds the three title fields; *Title and body* also adds `body`;
-*Title, body and raw payload* adds the complete custom `payload` too. This
-setting affects the JSON document only; URL placeholders are explicit and work
-with every method.
+Quoted placeholders (`"{body}"`, as above) become JSON strings; `{received_at}`
+may be used unquoted as a number and `{payload}` must be unquoted so the raw
+payload object is inserted. The `Content-Type: application/json` header is added
+unless the rule configures its own. A missing value becomes an empty string
+(or `null` when used unquoted).
+
+A form body is sent verbatim except that placeholder values are
+`application/x-www-form-urlencoded`-encoded:
+
+```
+text={display_title}&descr={body}&ts={received_at}
+```
+
+The `Content-Type: application/x-www-form-urlencoded` header is added unless the
+rule configures its own, and a missing value becomes an empty field. Bodies
+written by older versions (which used a *Message content* option) are converted
+to the equivalent JSON template when `routes.json` is loaded.
 
 Webhook calls run on a background worker with a 10-second timeout, so a slow
 endpoint never delays the toast or the history. A failing webhook is logged and

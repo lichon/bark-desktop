@@ -59,11 +59,14 @@ def test_dialog_shows_existing_rules_and_saves_new_ones(
 def test_rule_editor_validates_and_returns_a_route(hidden_root):
     editor = RuleEditor(hidden_root)
     try:
-        assert editor.content_var.get() == "No message content"
+        assert editor.body_format_var.get() == "JSON"
         editor.name_var.set("Deploy")
         editor.group_var.set("ops")
         editor.title_var.set("prod")
-        editor.content_var.set("Title and body")
+        editor.body_format_var.set("Form (x-www-form-urlencoded)")
+        editor._update_body_hint()
+        editor.body_text.delete("1.0", "end")
+        editor.body_text.insert("1.0", "text={display_title}&descr={body}")
         editor.url_var.set("example.com/hook")
         editor.method_var.set("POST")
         editor.headers_text.delete("1.0", "end")
@@ -76,5 +79,6 @@ def test_rule_editor_validates_and_returns_a_route(hidden_root):
     assert editor.result.name == "Deploy"
     assert editor.result.message_group == "ops"
     assert editor.result.url == "https://example.com/hook"
-    assert editor.result.content == "body"
+    assert editor.result.body_format == "form"
+    assert editor.result.body == "text={display_title}&descr={body}"
     assert editor.result.headers == {"Authorization": "Bearer token"}

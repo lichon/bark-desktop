@@ -16,10 +16,11 @@ from bark_pc.push.routing import (
     WebhookRoute,
     format_webhook_url,
     parse_header_lines,
+    render_webhook_body,
     route_matches,
+    validate_body,
     validate_headers,
     validate_webhook_url,
-    webhook_payload,
 )
 
 
@@ -89,7 +90,8 @@ def test_route_from_dict_applies_defaults_and_rejects_bad_method():
         {"url": "https://example.com/hook", "message_group": "ops", "enabled": False}
     )
     assert route.method == "GET"
-    assert route.content == "none"
+    assert route.body_format == "json"
+    assert route.body == ""
     assert route.message_group == "ops"
     assert route.enabled is False
     with pytest.raises(ValueError):
@@ -101,6 +103,94 @@ def test_legacy_message_type_is_read_as_the_message_group():
         {"url": "https://example.com/hook", "message_type": "ops"}
     )
     assert route.message_group == "ops"
+
+
+def test_legacy_content_mode_is_migrated_to_a_body_template():
+    route = WebhookRoute.from_dict(
+        {"url": "https://example.com/hook", "method": "POST", "content": "body"}
+    )
+    assert route.body_format == "json"
+    rendered = render_webhook_body(_notification(), route)
+    assert json.loads(rendered) == {
+        "title": "Deploy finished",
+        "subtitle": "prod",
+        "display_title": "Deploy finished — prod",
+        "body": "build 412 is live",
+    }
+    assert WebhookRoute.from_dict(
+        {"url": "https://example.com/hook", "content": "none"}
+    ).body == ""
+
+
+def test_json_body_template_is_filled_and_escaped():
+    notification = _notification(body='quote " and newline\n')
+    route = WebhookRoute.from_dict(
+        {
+            "url": "https://example.com/hook",
+            "method": "POST",
+            "body_format": "json",
+            "body": (
+                '{"text": "{display_title}: {body}", "ts": {received_at}, '
+                '"payload": {payload}, "image": "{image_url}"}'
+            ),
+        }
+    )
+    body = json.loads(render_webhook_body(notification, route))
+    assert body["text"] == 'Deploy finished — prod: quote " and newline\n'
+    assert body["ts"] == 1_700_000_000_000
+    assert body["payload"]["type"] == "deploy"
+    assert body["image"] == "https://example.com/chart.png"
+
+
+def test_form_body_template_is_filled_and_form_encoded():
+    route = WebhookRoute.from_dict(
+        {
+            "url": "https://example.com/hook",
+            "method": "PATCH",
+            "body_format": "form",
+            "body": "text={display_title}&descr={body}&ts={received_at}",
+        }
+    )
+    assert render_webhook_body(_notification(), route) == (
+        "text=Deploy+finished+%E2%80%94+prod&descr=build+412+is+live"
+        "&ts=1700000000000"
+    )
+
+
+def test_empty_body_sends_nothing_and_get_ignores_the_body():
+    route = WebhookRoute.from_dict({"url": "https://example.com/hook"})
+    assert render_webhook_body(_notification(), route) is None
+
+    route = WebhookRoute.from_dict(
+        {
+            "url": "https://example.com/hook",
+            "method": "POST",
+            "body": '{"group": "{group}"}',
+        }
+    )
+    assert route.sends_body
+    route.method = "GET"
+    assert not route.sends_body
+    assert render_webhook_body(_notification(), route) is None
+
+
+def test_invalid_body_templates_are_rejected():
+    with pytest.raises(ValueError):
+        validate_body('{"title": {title}}', "json")  # unquoted string placeholder
+    with pytest.raises(ValueError):
+        validate_body('{"payload": "{payload}"}', "json")  # quoted payload
+    with pytest.raises(ValueError):
+        validate_body('{not valid json}', "json")
+    with pytest.raises(ValueError):
+        WebhookRoute.from_dict(
+            {"url": "https://example.com/hook", "body": '{"a": "{nope}"}'}
+        )
+    with pytest.raises(ValueError):
+        WebhookRoute.from_dict(
+            {"url": "https://example.com/hook", "body_format": "xml"}
+        )
+    # Form bodies are accepted verbatim.
+    assert validate_body("a=1&b={title}", "form") == "a=1&b={title}"
 
 
 def test_route_store_round_trips_and_skips_invalid_entries(portable_paths: Paths):
@@ -187,57 +277,8 @@ def test_message_group_is_empty_without_a_group():
 
 
 # --------------------------------------------------------------------------- #
-# Payload and delivery
+# Bodies and delivery
 # --------------------------------------------------------------------------- #
-def test_webhook_payload_exposes_the_notification_and_raw_fields():
-    notification = _notification()
-    route = WebhookRoute.from_dict(
-        {"name": "CI", "url": "https://example.com/hook", "content": "full"}
-    )
-    body = webhook_payload(notification, route)
-    assert body["event"] == "bark.notification"
-    assert body["route"] == {"id": route.id, "name": "CI"}
-    assert "type" not in body
-    assert body["group"] == "ops"
-    assert body["display_title"] == "Deploy finished — prod"
-    assert body["payload"]["type"] == "deploy"
-    assert body["received_at_iso"].startswith("2023-11-14T22:13:20")
-
-
-def test_webhook_payload_omits_message_content_by_default():
-    notification = _notification()
-    route = WebhookRoute.from_dict({"url": "https://example.com/hook"})
-    body = webhook_payload(notification, route)
-    for key in ("title", "subtitle", "display_title", "body", "payload"):
-        assert key not in body
-    assert "type" not in body
-    assert "level" not in body
-    assert body["group"] == "ops"
-    assert body["source"] == "api.day.app"
-
-
-def test_content_mode_selects_which_message_fields_are_sent():
-    notification = _notification()
-    route = WebhookRoute.from_dict({"url": "https://example.com/hook"})
-
-    route.content = "title"
-    body = webhook_payload(notification, route)
-    assert body["title"] == "Deploy finished"
-    assert "body" not in body
-    assert "payload" not in body
-
-    route.content = "body"
-    body = webhook_payload(notification, route)
-    assert body["title"] == "Deploy finished"
-    assert body["body"] == "build 412 is live"
-    assert "payload" not in body
-
-    route.content = "full"
-    body = webhook_payload(notification, route)
-    assert body["body"] == "build 412 is live"
-    assert body["payload"]["type"] == "deploy"
-
-
 def test_format_webhook_url_fills_and_encodes_placeholders():
     notification = _notification()
     route = WebhookRoute.from_dict(
@@ -256,7 +297,7 @@ def test_unknown_url_placeholders_are_rejected():
         WebhookRoute.from_dict({"url": "https://example.com/hook/{nope}"})
 
 
-def test_dispatcher_delivers_to_every_matching_rule_with_headers_and_method():
+def test_dispatcher_delivers_body_with_headers_and_method():
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -267,6 +308,7 @@ def test_dispatcher_delivers_to_every_matching_rule_with_headers_and_method():
         {
             "url": "https://example.com/hook",
             "method": "PUT",
+            "body": '{"group": "{group}", "text": "{display_title}"}',
             "headers": {"Authorization": "Bearer secret"},
         }
     )
@@ -285,10 +327,41 @@ def test_dispatcher_delivers_to_every_matching_rule_with_headers_and_method():
     request = requests[0]
     assert request.method == "PUT"
     assert request.headers["Authorization"] == "Bearer secret"
-    assert json.loads(request.content)["group"] == "ops"
+    assert request.headers["Content-Type"] == "application/json"
+    assert json.loads(request.content) == {
+        "group": "ops",
+        "text": "Deploy finished — prod",
+    }
 
 
-def test_default_get_delivery_sends_fields_as_query_parameters():
+def test_delivery_sends_a_form_body_and_keeps_a_custom_content_type():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    route = WebhookRoute.from_dict(
+        {
+            "url": "https://example.com/hook",
+            "method": "POST",
+            "body_format": "form",
+            "body": "text={display_title}",
+            "headers": {"content-type": "text/plain; charset=utf-8"},
+        }
+    )
+    dispatcher = WebhookDispatcher(transport=httpx.MockTransport(handler))
+    try:
+        dispatcher.deliver(route, _notification())
+    finally:
+        dispatcher.close()
+
+    request = requests[0]
+    assert request.headers["Content-Type"] == "text/plain; charset=utf-8"
+    assert request.content == b"text=Deploy+finished+%E2%80%94+prod"
+
+
+def test_default_get_delivery_sends_no_body_and_no_extra_params():
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -298,7 +371,7 @@ def test_default_get_delivery_sends_fields_as_query_parameters():
     route = WebhookRoute.from_dict(
         {
             "url": "https://example.com/hook?token=abc&title={title}&body={body}",
-            "content": "body",
+            "method": "GET",
         }
     )
     dispatcher = WebhookDispatcher(transport=httpx.MockTransport(handler))
@@ -317,6 +390,7 @@ def test_default_get_delivery_sends_fields_as_query_parameters():
     for key in ("group", "source", "received_at", "payload"):
         assert key not in params
     assert request.content == b""
+    assert "Content-Type" not in request.headers
 
 
 def test_dispatcher_skips_self_messages_and_non_matching_rules():

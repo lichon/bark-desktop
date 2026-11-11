@@ -107,6 +107,10 @@ class HistoryWindow:
             toolbar, text="Settings", command=self._open_settings
         )
         self.settings_button.pack(side="left")
+        self.routing_button = ttk.Button(
+            toolbar, text="Routing…", command=self._open_routing
+        )
+        self.routing_button.pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Clear all", command=self._clear_all).pack(
             side="left", padx=(6, 0)
         )
@@ -292,6 +296,16 @@ class HistoryWindow:
             callback()
         except Exception:  # pragma: no cover - UI callback must not crash
             logger.exception("open settings failed")
+
+    def _open_routing(self) -> None:
+        """Open the webhook routing dialog through the controller."""
+        callback = self.callbacks.get("on_open_routing")
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # pragma: no cover - UI callback must not crash
+            logger.exception("open routing failed")
 
     def _status_text(self) -> str:
         """Server host plus connection state from the controller.

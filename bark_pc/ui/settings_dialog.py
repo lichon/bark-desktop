@@ -8,6 +8,7 @@ from dataclasses import fields
 from tkinter import messagebox, ttk
 
 from ..core.config import (
+    LOG_LEVELS,
     MESSAGE_ROUTE_BARK,
     MESSAGE_ROUTE_BOTH,
     MESSAGE_ROUTE_LABELS,
@@ -54,7 +55,7 @@ class SettingsDialog:
     def _fit_to_content(self) -> None:
         """Size the window to its widgets so no control is ever clipped."""
         self.window.update_idletasks()
-        width = max(560, self.window.winfo_reqwidth())
+        width = self.window.winfo_reqwidth()
         height = min(self.window.winfo_reqheight(), self.window.winfo_screenheight() - 80)
         x = max(0, (self.window.winfo_screenwidth() - width) // 2)
         y = max(0, (self.window.winfo_screenheight() - height) // 2)
@@ -62,27 +63,51 @@ class SettingsDialog:
 
     # -- layout ------------------------------------------------------------ #
     def _build(self) -> None:
-        container = ttk.Frame(self.window, padding=14)
+        container = ttk.Frame(self.window, padding=10)
         container.pack(fill="both", expand=True)
 
-        ttk.Label(container, text="Bark server", style="Subtitle.TLabel").grid(
+        self.notebook = ttk.Notebook(container)
+        self.notebook.pack(fill="both", expand=True)
+        connection = ttk.Frame(self.notebook, padding=(12, 10))
+        notifications = ttk.Frame(self.notebook, padding=(12, 10))
+        maintenance = ttk.Frame(self.notebook, padding=(12, 10))
+        self.notebook.add(connection, text="Connection")
+        self.notebook.add(notifications, text="Notifications")
+        self.notebook.add(maintenance, text="Maintenance")
+
+        self._build_connection_tab(connection)
+        self._build_notifications_tab(notifications)
+        self._build_maintenance_tab(maintenance)
+
+        self.status_label = ttk.Label(
+            container, text="", style="Muted.TLabel", wraplength=520
+        )
+        self.status_label.pack(anchor="w", pady=(6, 0))
+
+        buttons = ttk.Frame(container)
+        buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="Cancel", command=self.close).pack(side="right")
+        ttk.Button(buttons, text="Save", style="Accent.TButton", command=self._save).pack(
+            side="right", padx=(0, 8)
+        )
+
+    def _build_connection_tab(self, tab: ttk.Frame) -> None:
+        ttk.Label(tab, text="Bark server", style="Subtitle.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Label(container, text="Server address").grid(row=1, column=0, sticky="w")
+        ttk.Label(tab, text="Server address").grid(row=1, column=0, sticky="w")
         self.server_var = tk.StringVar()
-        ttk.Entry(container, textvariable=self.server_var, width=42).grid(
+        ttk.Entry(tab, textvariable=self.server_var, width=34).grid(
             row=1, column=1, sticky="ew", pady=2
         )
-        ttk.Label(container, text="Push topic").grid(
-            row=2, column=0, sticky="w"
-        )
+        ttk.Label(tab, text="Push topic").grid(row=2, column=0, sticky="w")
         self.topic_var = tk.StringVar()
-        ttk.Entry(container, textvariable=self.topic_var, width=42).grid(
+        ttk.Entry(tab, textvariable=self.topic_var, width=34).grid(
             row=2, column=1, sticky="ew", pady=2
         )
 
         self.supabase_frame = ttk.LabelFrame(
-            container, text="Supabase Realtime (optional)", padding=(8, 4)
+            tab, text="Supabase Realtime (optional)", padding=(8, 4)
         )
         self.supabase_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2))
         self.supabase_enabled_var = tk.BooleanVar()
@@ -97,98 +122,136 @@ class SettingsDialog:
         )
         self.supabase_url_var = tk.StringVar()
         self.supabase_url_entry = ttk.Entry(
-            self.supabase_frame, textvariable=self.supabase_url_var, width=42
+            self.supabase_frame, textvariable=self.supabase_url_var, width=34
         )
         self.supabase_url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
         ttk.Label(self.supabase_frame, text="Auth key").grid(row=2, column=0, sticky="w")
         self.supabase_key_var = tk.StringVar()
         self.supabase_key_entry = ttk.Entry(
-            self.supabase_frame, textvariable=self.supabase_key_var, width=42, show="*"
+            self.supabase_frame, textvariable=self.supabase_key_var, width=34, show="*"
         )
         self.supabase_key_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0))
         ttk.Label(self.supabase_frame, text="Room name").grid(row=3, column=0, sticky="w")
         self.supabase_topic_var = tk.StringVar()
         self.supabase_topic_entry = ttk.Entry(
-            self.supabase_frame, textvariable=self.supabase_topic_var, width=42
+            self.supabase_frame, textvariable=self.supabase_topic_var, width=34
         )
         self.supabase_topic_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0))
         self.supabase_frame.columnconfigure(1, weight=1)
 
-        ttk.Separator(container).grid(row=4, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=4, column=0, columnspan=2, sticky="ew", pady=6)
 
-        ttk.Label(container, text="History and images", style="Subtitle.TLabel").grid(
+        ttk.Label(tab, text="Message send", style="Subtitle.TLabel").grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Label(container, text="Keep at most (50–10 000)").grid(row=6, column=0, sticky="w")
+        ttk.Label(tab, text="Send compose-bar messages to").grid(
+            row=6, column=0, sticky="w"
+        )
+        self.route_var = tk.StringVar()
+        self.route_combo = ttk.Combobox(
+            tab,
+            textvariable=self.route_var,
+            values=[MESSAGE_ROUTE_LABELS[name] for name in MESSAGE_ROUTES],
+            state="readonly",
+            width=24,
+        )
+        self.route_combo.grid(row=6, column=1, sticky="w", pady=2)
+        self.route_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._toggle_route_fields()
+        )
+        ttk.Label(tab, text="Bark URL (device key included)").grid(
+            row=7, column=0, sticky="w"
+        )
+        self.route_url_var = tk.StringVar()
+        self.route_url_entry = ttk.Entry(tab, textvariable=self.route_url_var, width=34)
+        self.route_url_entry.grid(row=7, column=1, sticky="ew", pady=2)
+
+        route_actions = ttk.Frame(tab)
+        route_actions.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(
+            route_actions,
+            text="For example https://api.day.app/<device_key>",
+            style="Muted.TLabel",
+        ).pack(side="left")
+
+        tab.columnconfigure(1, weight=1)
+
+    def _build_notifications_tab(self, tab: ttk.Frame) -> None:
+        ttk.Label(tab, text="History and images", style="Subtitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        ttk.Label(tab, text="Keep at most (50–10 000)").grid(row=1, column=0, sticky="w")
         self.count_var = tk.StringVar()
         ttk.Spinbox(
-            container, from_=50, to=10_000, increment=50, textvariable=self.count_var, width=10
-        ).grid(row=6, column=1, sticky="w", pady=2)
-        ttk.Label(container, text="Keep for at most (1–365 days)").grid(row=7, column=0, sticky="w")
-        self.days_var = tk.StringVar()
-        ttk.Spinbox(container, from_=1, to=365, textvariable=self.days_var, width=10).grid(
-            row=7, column=1, sticky="w", pady=2
+            tab, from_=50, to=10_000, increment=50, textvariable=self.count_var, width=10
+        ).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(tab, text="Keep for at most (1–365 days)").grid(
+            row=2, column=0, sticky="w"
         )
-        ttk.Label(container, text="Image cache (20–2 000 MB)").grid(row=8, column=0, sticky="w")
+        self.days_var = tk.StringVar()
+        ttk.Spinbox(tab, from_=1, to=365, textvariable=self.days_var, width=10).grid(
+            row=2, column=1, sticky="w", pady=2
+        )
+        ttk.Label(tab, text="Image cache (20–2 000 MB)").grid(row=3, column=0, sticky="w")
         self.cache_var = tk.StringVar()
         ttk.Spinbox(
-            container, from_=20, to=2_000, increment=20, textvariable=self.cache_var, width=10
-        ).grid(row=8, column=1, sticky="w", pady=2)
+            tab, from_=20, to=2_000, increment=20, textvariable=self.cache_var, width=10
+        ).grid(row=3, column=1, sticky="w", pady=2)
 
-        ttk.Separator(container).grid(row=9, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=4, column=0, columnspan=2, sticky="ew", pady=6)
 
-        ttk.Label(container, text="Notifications", style="Subtitle.TLabel").grid(
-            row=10, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        ttk.Label(tab, text="Notifications", style="Subtitle.TLabel").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         self.toasts_var = tk.BooleanVar()
         ttk.Checkbutton(
-            container, text="Show Windows notifications", variable=self.toasts_var
-        ).grid(row=11, column=0, columnspan=2, sticky="w")
+            tab, text="Show Windows notifications", variable=self.toasts_var
+        ).grid(row=6, column=0, columnspan=2, sticky="w")
         self.hide_preview_var = tk.BooleanVar()
         ttk.Checkbutton(
-            container,
+            tab,
             text='Hide preview text (show "New notification" instead)',
             variable=self.hide_preview_var,
-        ).grid(row=12, column=0, columnspan=2, sticky="w")
-        ttk.Label(container, text="Silence notifications").grid(
-            row=13, column=0, sticky="w", pady=(2, 0)
+        ).grid(row=7, column=0, columnspan=2, sticky="w")
+        ttk.Label(tab, text="Silence notifications").grid(
+            row=8, column=0, sticky="w", pady=(2, 0)
         )
         self.silence_var = tk.StringVar(value="Off")
         ttk.Combobox(
-            container,
+            tab,
             textvariable=self.silence_var,
             values=list(SILENCE_CHOICES),
             state="readonly",
             width=20,
-        ).grid(row=13, column=1, sticky="w", pady=(2, 0))
+        ).grid(row=8, column=1, sticky="w", pady=(2, 0))
         self.autostart_var = tk.BooleanVar()
         ttk.Checkbutton(
-            container, text="Start with Windows (no admin rights)", variable=self.autostart_var
-        ).grid(row=14, column=0, columnspan=2, sticky="w", pady=(2, 0))
+            tab, text="Start with Windows (no admin rights)", variable=self.autostart_var
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
-        ttk.Separator(container).grid(row=15, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=10, column=0, columnspan=2, sticky="ew", pady=6)
 
-        ttk.Label(container, text="Text-to-speech", style="Subtitle.TLabel").grid(
-            row=16, column=0, columnspan=2, sticky="w"
+        ttk.Label(tab, text="Text-to-speech", style="Subtitle.TLabel").grid(
+            row=11, column=0, columnspan=2, sticky="w"
         )
         self.tts_var = tk.BooleanVar()
         ttk.Checkbutton(
-            container, text="Speak notifications aloud", variable=self.tts_var
-        ).grid(row=17, column=0, sticky="w")
+            tab, text="Speak notifications aloud", variable=self.tts_var
+        ).grid(row=12, column=0, sticky="w")
         self.tts_provider_var = tk.StringVar()
         ttk.Combobox(
-            container,
+            tab,
             textvariable=self.tts_provider_var,
             values=[PROVIDER_LABELS[name] for name in TTS_PROVIDERS],
             state="readonly",
             width=22,
-        ).grid(row=17, column=1, sticky="w")
+        ).grid(row=12, column=1, sticky="w")
         self.tts_body_var = tk.BooleanVar()
         ttk.Checkbutton(
-            container, text="Read the message body too", variable=self.tts_body_var
-        ).grid(row=18, column=0, sticky="w")
-        voice = ttk.Frame(container)
-        voice.grid(row=18, column=1, sticky="w")
+            tab, text="Read the message body too", variable=self.tts_body_var
+        ).grid(row=13, column=0, sticky="w")
+        voice = ttk.Frame(tab)
+        voice.grid(row=13, column=1, sticky="w")
         self.tts_rate_var = tk.StringVar()
         ttk.Spinbox(voice, from_=-10, to=10, textvariable=self.tts_rate_var, width=4).pack(
             side="left"
@@ -205,70 +268,64 @@ class SettingsDialog:
         )
         self.tts_unlocked_var = tk.BooleanVar()
         ttk.Checkbutton(
-            container,
+            tab,
             text="Only read aloud while the screen is unlocked",
             variable=self.tts_unlocked_var,
-        ).grid(row=19, column=0, columnspan=2, sticky="w")
+        ).grid(row=14, column=0, columnspan=2, sticky="w")
 
-        ttk.Separator(container).grid(row=20, column=0, columnspan=2, sticky="ew", pady=6)
+        tab.columnconfigure(1, weight=1)
 
-        ttk.Label(container, text="Message route", style="Subtitle.TLabel").grid(
-            row=21, column=0, columnspan=2, sticky="w", pady=(0, 4)
+    def _build_maintenance_tab(self, tab: ttk.Frame) -> None:
+        ttk.Label(tab, text="Maintenance", style="Subtitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Label(container, text="Send compose-bar messages to").grid(
-            row=22, column=0, sticky="w"
-        )
-        self.route_var = tk.StringVar()
-        self.route_combo = ttk.Combobox(
-            container,
-            textvariable=self.route_var,
-            values=[MESSAGE_ROUTE_LABELS[name] for name in MESSAGE_ROUTES],
-            state="readonly",
-            width=24,
-        )
-        self.route_combo.grid(row=22, column=1, sticky="w", pady=2)
-        self.route_combo.bind("<<ComboboxSelected>>", lambda _event: self._toggle_route_fields())
-        ttk.Label(container, text="Bark URL (device key included)").grid(
-            row=23, column=0, sticky="w"
-        )
-        self.route_url_var = tk.StringVar()
-        self.route_url_entry = ttk.Entry(
-            container, textvariable=self.route_url_var, width=42
-        )
-        self.route_url_entry.grid(row=23, column=1, sticky="ew", pady=2)
         ttk.Label(
-            container,
-            text="For example https://api.day.app/<device_key>",
+            tab,
+            text="Check the configured server, collect logs for support, or remove "
+            "stored messages and this device's registration.",
             style="Muted.TLabel",
-        ).grid(row=24, column=1, sticky="w")
+            wraplength=440,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        actions = ttk.Frame(tab)
+        actions.grid(row=2, column=0, columnspan=2, sticky="ew")
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        ttk.Button(actions, text="Check connection", command=self._check_connection).grid(
+            row=0, column=0, sticky="ew", pady=2
+        )
+        ttk.Button(actions, text="Export diagnostics", command=self._export).grid(
+            row=0, column=1, sticky="ew", padx=(6, 0), pady=2
+        )
+        ttk.Button(actions, text="Clear history", command=self._clear_history).grid(
+            row=1, column=0, sticky="ew", pady=2
+        )
+        ttk.Button(actions, text="Remove all data", command=self._remove_all).grid(
+            row=1, column=1, sticky="ew", padx=(6, 0), pady=2
+        )
 
-        ttk.Separator(container).grid(row=25, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 6))
 
-        actions = ttk.Frame(container)
-        actions.grid(row=26, column=0, columnspan=2, sticky="ew")
-        ttk.Button(actions, text="Check connection", command=self._check_connection).pack(
-            side="left"
+        ttk.Label(tab, text="Logging", style="Subtitle.TLabel").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Button(actions, text="Export diagnostics", command=self._export).pack(
-            side="left", padx=(6, 0)
-        )
-        ttk.Button(actions, text="Clear history", command=self._clear_history).pack(
-            side="left", padx=(6, 0)
-        )
-        ttk.Button(actions, text="Remove all data", command=self._remove_all).pack(
-            side="left", padx=(6, 0)
-        )
-
-        self.status_label = ttk.Label(container, text="", style="Muted.TLabel", wraplength=500)
-        self.status_label.grid(row=27, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
-        buttons = ttk.Frame(container)
-        buttons.grid(row=28, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(buttons, text="Cancel", command=self.close).pack(side="right")
-        ttk.Button(buttons, text="Save", style="Accent.TButton", command=self._save).pack(
-            side="right", padx=(0, 8)
-        )
-        container.columnconfigure(1, weight=1)
+        ttk.Label(tab, text="Log level").grid(row=5, column=0, sticky="w")
+        self.log_level_var = tk.StringVar(value="info")
+        ttk.Combobox(
+            tab,
+            textvariable=self.log_level_var,
+            values=list(LOG_LEVELS),
+            state="readonly",
+            width=12,
+        ).grid(row=5, column=1, sticky="w")
+        ttk.Label(
+            tab,
+            text="Debug also records every outbound HTTP request and response.",
+            style="Muted.TLabel",
+            wraplength=440,
+            justify="left",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        tab.columnconfigure(1, weight=1)
 
     # -- values ------------------------------------------------------------ #
     def _load_values(self) -> None:
@@ -293,6 +350,7 @@ class SettingsDialog:
         self.toasts_var.set(bool(settings.toasts_enabled))
         self.hide_preview_var.set(bool(settings.hide_preview_text))
         self.autostart_var.set(bool(settings.autostart_enabled))
+        self.log_level_var.set(settings.log_level)
         self.tts_var.set(bool(settings.tts_enabled))
         self.tts_provider_var.set(
             PROVIDER_LABELS.get(settings.tts_provider, PROVIDER_LABELS[DEFAULT_TTS_PROVIDER])
@@ -361,7 +419,7 @@ class SettingsDialog:
             "tts_volume": int(self.tts_volume_var.get()),
             "silence_until": silence_until,
             "autostart_enabled": bool(self.autostart_var.get()),
-            "log_level": self.settings.log_level,
+            "log_level": self.log_level_var.get().strip() or self.settings.log_level,
             "last_connected_at": self.settings.last_connected_at,
         }
 
@@ -463,7 +521,8 @@ class SettingsDialog:
         if not messagebox.askyesno(
             "Remove all data",
             "This removes the device identity, history, images, logs, settings, "
-            "the autostart entry and the barkpc: registration.\n\nContinue?",
+            "webhook routing rules, the autostart entry and the barkpc: registration.\n\n"
+            "Continue?",
             parent=self.window,
         ):
             return

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from bark_pc.core.config import (
+    LOG_LEVELS,
     Settings,
     SettingsStore,
     validate_server_url,
@@ -214,3 +215,13 @@ def test_invalid_message_route_and_bark_url_fall_back(portable_paths):
     assert settings.message_route == "realtime"
     assert settings.message_route_url == ""
     assert len(settings.warnings) >= 2
+
+
+def test_every_supported_log_level_is_accepted(portable_paths):
+    for level in LOG_LEVELS:
+        portable_paths.settings_path.write_text(
+            json.dumps({"log_level": level}), encoding="utf-8"
+        )
+        settings = SettingsStore(portable_paths).load()
+        assert settings.log_level == level
+        assert settings.warnings == []

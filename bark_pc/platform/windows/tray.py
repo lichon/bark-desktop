@@ -160,6 +160,7 @@ class TrayController:
             item("Copy device key", lambda: self._call("copy_key")),
             pystray.Menu.SEPARATOR,
             item("Settings…", lambda: self._call("settings")),
+            item("Message routing…", lambda: self._call("routing")),
             item("Setup…", lambda: self._call("setup")),
             item("Logs…", lambda: self._call("show_log_folder")),
             pystray.Menu.SEPARATOR,

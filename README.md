@@ -188,6 +188,92 @@ while the URL is configured even if the Realtime room is off or disconnected.
 the phone should receive it as a Bark push. If one route fails, the other is
 still used, and the tray reports which route failed.
 
+## Routing incoming messages to webhooks
+
+The client can also forward incoming messages to any HTTP webhook. Open
+*Routing…* in the Messages window (next to *Settings*) or tray menu → *Message
+routing…*, add a rule and press *Save*. Every rule has two optional match
+conditions and one URL:
+
+| Condition | Matches | Empty means |
+|-----------|---------|-------------|
+| Message group | The push's `group` field, or the Supabase room name (case-insensitive) | any message |
+| Title contains | A case-insensitive substring of the title or subtitle | any message |
+| Webhook URL | `http://` or `https://`; may contain `{placeholders}`; custom headers are supported | — |
+| Method | `GET` (default), `POST`, `PUT` or `PATCH`; GET sends no body, the others send the JSON document | `GET` |
+| Message content | `No message content` (default), `Title only`, `Title and body`, or `Title, body and raw payload` | `No message content` |
+
+Both conditions must match when both are set. A rule with no conditions is a
+catch-all. Several rules can match the same message; each one receives the
+notification. Matching happens for messages received from the network; the
+compose bar's own messages and delete/recall pushes are never forwarded.
+
+Senders can add a group without changing the rest of their push:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/push -H 'Content-Type: application/json' \
+  -d '{"device_key":"<key>","group":"ops","title":"Deploy done","body":"build 412"}'
+```
+
+A rule with message group `ops` then forwards that message. Bark's `group`
+field (and, for Supabase rooms, the room name that becomes the group) is the
+only category used for matching, so existing senders need no changes.
+
+The client never appends fields or query parameters to the webhook URL. That
+URL is used exactly as configured, except for explicit placeholders:
+
+| Placeholder | Value |
+|-------------|-------|
+| `{id}`, `{remote_id}` | Local and sender-provided message ids |
+| `{group}` | The message group / Realtime room |
+| `{title}`, `{subtitle}`, `{display_title}` | Message title fields |
+| `{body}` | Message body |
+| `{url}`, `{image_url}` | The push URL and image URL |
+| `{source}` | The receiving server or room |
+| `{received_at}`, `{received_at_iso}` | Receipt time (epoch milliseconds / ISO 8601) |
+
+Placeholder values are URL-encoded, so they cannot change the URL structure.
+Unknown placeholders are rejected when the rule is saved. For example:
+
+```
+https://example.com/hook/{group}?title={title}&body={body}
+```
+
+`GET` (the default) sends a request to that URL with no body. `POST`, `PUT` and
+`PATCH` send the JSON document described below. Message text is **not** included
+automatically in that document: only metadata is sent unless the *Message
+content* setting opts in. This example uses *Title, body and raw payload*:
+
+```json
+{
+  "event": "bark.notification",
+  "route": {"id": "…", "name": "CI"},
+  "id": 42,
+  "remote_id": "c0ffee-uuid",
+  "group": "ops",
+  "url": "https://ci.example.com/build/412",
+  "image_url": null,
+  "source": "api.day.app",
+  "received_at": 1700000000000,
+  "received_at_iso": "2023-11-14T22:13:20+00:00",
+  "title": "Deploy done",
+  "subtitle": "prod",
+  "display_title": "Deploy done — prod",
+  "body": "build 412",
+  "payload": {"type": "deploy", "group": "ops"}
+}
+```
+
+*Title only* adds the three title fields; *Title and body* also adds `body`;
+*Title, body and raw payload* adds the complete custom `payload` too. This
+setting affects the JSON document only; URL placeholders are explicit and work
+with every method.
+
+Webhook calls run on a background worker with a 10-second timeout, so a slow
+endpoint never delays the toast or the history. A failing webhook is logged and
+dropped; local delivery is unaffected. Rules live in `routes.json` in the data
+folder and take effect as soon as *Save* is pressed.
+
 ## Tray and windows
 
 | Action | Where |
@@ -198,6 +284,7 @@ still used, and the tray reports which route failed.
 | Read notifications aloud | Tray menu → *Speak notifications* (toggle) |
 | Copy the device key | Tray menu → *Copy device key* |
 | Settings | Tray menu → *Settings…* |
+| Message routing | Messages window → *Routing…*, or tray menu → *Message routing…* |
 | Re-run setup | Tray menu → *Setup…* |
 | Quit | Tray menu → *Quit* |
 
@@ -260,7 +347,7 @@ folder:
 The layout inside the folder is the same everywhere:
 
 ```
-bark.db  settings.json  identity.bin
+bark.db  settings.json  routes.json  identity.bin
 images/  logs/
 ```
 
@@ -279,8 +366,10 @@ folder next to the `.app` when you want data to travel with the bundle.
 * Notification content stays on this machine. The only outbound connections are
   Apple's activation service, Apple's courier, the Bark server you chose, the
   Supabase project and its Realtime WebSocket when the optional room is enabled,
-  the Bark URL configured for self messages, and the image URLs contained in
-  your own pushes.
+  the Bark URL configured for self messages, the webhook URLs you route
+  messages to, and the image URLs contained in your own pushes.
+* Webhook rules (`routes.json`) may contain an `Authorization` header or a
+  token in the webhook URL. Treat that file as a credential too.
 * The activation identity (`identity.bin`) is encrypted with the platform's
   per-user secret store. On Windows that is DPAPI, scoped to the current
   account: it cannot be read by another Windows account, even if the folder is
@@ -288,11 +377,12 @@ folder next to the `.app` when you want data to travel with the bundle.
   (Secret Service) backends implement.
 * Logs (`logs/app.log`) are rotated at 2 MB × 3 and redact tokens, certificates
   and notification bodies.
-* Set the log level to `debug` (Settings → Log level) to also record every
-  outbound HTTP request and response, including the `httpx`/`httpcore` details
-  of libraries that create their own clients.
+* Set the log level in *Settings → Maintenance → Log level* (`debug`, `info`,
+  `warning` or `error`). `debug` also records every outbound HTTP request and
+  response, including the `httpx`/`httpcore` details of libraries that create
+  their own clients.
 * *Settings → Remove all data* deletes the identity, history, images, logs,
-  settings, the autostart entry and the `barkpc:` registration.
+  settings, webhook rules, the autostart entry and the `barkpc:` registration.
 
 ## Troubleshooting
 

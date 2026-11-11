@@ -29,6 +29,7 @@ APP_DATA_DIRNAME = "BarkDesktopClient"
 DEFAULT_SERVER_URL = "https://api.day.app"
 DEFAULT_PUSH_TOPIC = "me.fin.bark"
 SETTINGS_FILENAME = "settings.json"
+WEBHOOK_ROUTES_FILENAME = "routes.json"
 SUPABASE_SCHEME = "sb"
 MAX_SUPABASE_KEY_LENGTH = 4096
 MAX_MESSAGE_ROUTE_URL_LENGTH = 2048
@@ -141,6 +142,10 @@ class Paths:
     @property
     def settings_path(self) -> Path:
         return self.data_dir / SETTINGS_FILENAME
+
+    @property
+    def routes_path(self) -> Path:
+        return self.data_dir / WEBHOOK_ROUTES_FILENAME
 
     @property
     def db_path(self) -> Path:

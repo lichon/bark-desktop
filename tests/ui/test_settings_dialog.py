@@ -52,3 +52,15 @@ def test_close_notifies_the_controller(hidden_root, settings_store):
     hidden_root.update()
     dialog.close()
     assert closed == [True]
+
+
+def test_log_level_is_loaded_and_included_in_the_candidate(hidden_root, settings_store):
+    dialog = SettingsDialog(
+        hidden_root, settings_store=settings_store, controller=FakeController()
+    )
+    try:
+        assert dialog.log_level_var.get() == "info"
+        dialog.log_level_var.set("debug")
+        assert dialog._candidate()["log_level"] == "debug"
+    finally:
+        dialog.close()

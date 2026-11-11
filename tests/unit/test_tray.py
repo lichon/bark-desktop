@@ -12,6 +12,7 @@ ACTION_NAMES = (
     "toggle_tts",
     "copy_key",
     "settings",
+    "routing",
     "setup",
     "show_log_folder",
     "quit",
@@ -45,3 +46,12 @@ def test_show_log_folder_invokes_the_registered_action() -> None:
     item(None)
 
     assert calls == ["show_log_folder"]
+
+
+def test_message_routing_is_a_top_level_item() -> None:
+    controller, calls = _controller()
+    item = next(item for item in _items(controller) if item.text == "Message routing…")
+
+    item(None)
+
+    assert calls == ["routing"]

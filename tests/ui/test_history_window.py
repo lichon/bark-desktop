@@ -315,3 +315,20 @@ def test_compose_bar_uses_the_general_route_state(hidden_root, db):
         assert window.message_var.get() == ""
     finally:
         window.destroy()
+
+
+def test_routing_button_sits_next_to_settings_and_opens_the_dialog(hidden_root, db):
+    opened: list[bool] = []
+    window = HistoryWindow(
+        hidden_root,
+        db=db,
+        callbacks={"on_open_routing": lambda: opened.append(True)},
+    )
+    try:
+        toolbar = window.settings_button.master
+        assert toolbar.pack_slaves()[:2] == [window.settings_button, window.routing_button]
+        assert window.routing_button.cget("text") == "Routing…"
+        window._open_routing()
+    finally:
+        window.destroy()
+    assert opened == [True]

@@ -61,6 +61,7 @@ from .push import supabase_realtime
 from .push.identity import IdentityManager
 from .push.ingest import Ingestor
 from .push.pypush_client import PypushReceiver
+from .push.routing import RouteStore, WebhookDispatcher
 from .push.supervisor import PushSupervisor
 from .tts import TTS_PREVIEW_TEXT, build_tts_provider, should_speak, speech_text
 from .ui.setup_wizard import SetupResult, SetupWizard
@@ -97,6 +98,10 @@ class BarkApp:
         if migrated:
             self.log.info("moved legacy data folder to %s", self.paths.data_dir)
         self.db = Database(self.paths.db_path, logger=self.log)
+        self.route_store = RouteStore(self.paths, self.log)
+        self.webhook_dispatcher = WebhookDispatcher(
+            self.route_store.routes, logger_=self.log
+        )
 
         self.secret_store = get_store()
         self.identity = IdentityManager(
@@ -150,6 +155,7 @@ class BarkApp:
         self.tray: TrayController | None = None
         self.history_window = None
         self.settings_dialog = None
+        self.routing_dialog = None
         self.setup_wizard = None
 
         self._stop = threading.Event()
@@ -311,6 +317,7 @@ class BarkApp:
                 "toggle_tts": lambda: self._on_ui(self.toggle_tts),
                 "copy_key": lambda: self._on_ui(self.copy_device_key),
                 "settings": lambda: self._on_ui(self.open_settings),
+                "routing": lambda: self._on_ui(self.open_routing),
                 "setup": lambda: self._on_ui(self.open_setup),
                 "show_log_folder": lambda: self._on_ui(self.show_log_folder),
                 "quit": lambda: self._on_ui(self.request_quit),
@@ -579,6 +586,11 @@ class BarkApp:
 
     def _on_notification_stored(self, notification: Notification) -> None:
         self._signal_selftest(notification.remote_id)
+        if not notification.from_self:
+            try:
+                self.webhook_dispatcher.submit(notification)
+            except Exception:  # pragma: no cover - routing must never break ingest
+                self.log.exception("webhook routing failed")
         self._on_ui(lambda: self._present(notification))
 
     def _on_notification_deleted(self, remote_id: str) -> None:
@@ -876,7 +888,11 @@ class BarkApp:
             self.settings.tts_rate,
             self.settings.tts_volume,
         )
+        previous_log_level = self.settings.log_level
         self.settings = settings
+        if previous_log_level != settings.log_level:
+            self.log = build_logger(self.paths.log_path, level=settings.log_level)
+            self.log.info("log level changed to %s", settings.log_level)
         self.image_store.cache_limit_mb = settings.image_cache_mb
         self.notifier.toasts_enabled = settings.toasts_enabled
         self.notifier.hide_preview = settings.hide_preview_text
@@ -1013,6 +1029,7 @@ class BarkApp:
             Path(f"{self.paths.db_path}-wal"),
             Path(f"{self.paths.db_path}-shm"),
             self.paths.settings_path,
+            self.paths.routes_path,
             self.paths.instance_path,
         ]
         for path in targets:
@@ -1118,6 +1135,7 @@ class BarkApp:
                 callbacks={
                     "on_read": lambda _id: self._refresh_status_summary(),
                     "on_open_settings": self.open_settings,
+                    "on_open_routing": self.open_routing,
                     "on_clear_all": self.clear_history,
                     "connection_status": self._connection_status_text,
                     "can_send_message": self.can_send_message,
@@ -1153,6 +1171,32 @@ class BarkApp:
 
     def _on_settings_closed(self) -> None:
         self.settings_dialog = None
+
+    def open_routing(self) -> None:
+        if self.shell is None:
+            return
+        from .ui.routing_dialog import RoutingDialog
+
+        if self.routing_dialog is not None:
+            try:
+                self.routing_dialog.show()
+                return
+            except Exception:  # pragma: no cover - stale window
+                self.routing_dialog = None
+        self.routing_dialog = RoutingDialog(
+            self.shell.root,
+            route_store=self.route_store,
+            on_saved=self.apply_webhook_routes,
+            on_closed=self._on_routing_closed,
+        )
+        self.routing_dialog.show()
+
+    def _on_routing_closed(self) -> None:
+        self.routing_dialog = None
+
+    def apply_webhook_routes(self, routes) -> None:
+        """Apply freshly saved webhook rules without restarting the receivers."""
+        self.webhook_dispatcher.set_routes(list(routes))
 
     def open_setup(self) -> None:
         if self.shell is None:
@@ -1402,6 +1446,7 @@ class BarkApp:
             self._maintenance_thread.join(timeout=1.0)
             self._maintenance_thread = None
         self.fetcher.shutdown(timeout=1.0)
+        self.webhook_dispatcher.close(timeout=1.0)
         if self._tts_preview is not None:
             self._tts_preview.shutdown(timeout=0.5)
             self._tts_preview = None
@@ -1415,6 +1460,9 @@ class BarkApp:
         if self.settings_dialog is not None:
             self.settings_dialog.close()
             self.settings_dialog = None
+        if self.routing_dialog is not None:
+            self.routing_dialog.close()
+            self.routing_dialog = None
         if self.setup_wizard is not None:
             self.setup_wizard.close()
             self.setup_wizard = None

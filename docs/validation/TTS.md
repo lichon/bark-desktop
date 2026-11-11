@@ -23,15 +23,15 @@ work.
   is closed on shutdown, a burst keeps only the newest lines, a missing engine
   disables speech instead of raising, and one failing utterance does not kill the
   worker.
-* **Windows engine** — `SapiEngine` opens, sets `Rate`/`Volume`, purges and closes
-  (skipped when no SAPI voice is registered, or when the machine has no audio
-  endpoint — a CI runner, a server — and SAPI refuses to `Speak`); the
-  `EXCEPINFO` struct is checked against the native layout so a refusal reports
-  SAPI's own `scode` and description instead of a bare `0x80020009`, and the
-  `VARIANT` struct stride is asserted to be 24 bytes on x64 / 16 bytes on x86,
-  which is what makes `DISPPARAMS` argument passing correct.
+* **Windows engine** — the `VARIANT` struct stride is asserted to be 24 bytes on
+  x64 / 16 bytes on x86, which is what makes `DISPPARAMS` argument passing
+  correct.  No `SAPI.SpVoice` object is created anywhere in the suite: the
+  Windows runner has no audio endpoint, and asking SAPI to speak on such a
+  machine ends the process with an access violation (previously a smoke test
+  here; removed rather than skipped, because the failure is not an exception
+  Python can catch).
 
-Whole suite: `python -m pytest` — 408 tests, headless, offline, all passing.
+Whole suite: `python -m pytest` — 404 tests, headless, offline, all passing.
 
 `python -m ruff check bark_pc tests` — clean.
 

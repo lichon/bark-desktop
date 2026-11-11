@@ -10,11 +10,6 @@ Threading: a COM object belongs to the apartment that created it, so an engine
 must be created and used on a single thread.  `bark_pc.tts.worker` owns that
 thread; nothing here is thread safe and nothing here is imported until the first
 line is spoken.
-
-Failures raise `SapiError`, never a bare `IDispatch::Invoke` error: `Invoke` only
-ever reports `DISP_E_EXCEPTION`, so the `EXCEPINFO` it fills in is read and
-surfaced as SAPI's own `scode` plus description ("no audio device was found"
-beats "0x80020009" in a log line).
 """
 
 from __future__ import annotations
@@ -50,7 +45,6 @@ PURGE_FLAGS = 0x2 | 0x10
 _S_OK = 0
 _S_FALSE = 1
 _RPC_E_CHANGED_MODE = -2147417850  # 0x80010106: COM already up in another mode
-DISP_E_EXCEPTION = 0x80020009  # the object raised; see EXCEPINFO.scode
 
 RATE_RANGE = (-10, 10)
 VOLUME_RANGE = (0, 100)
@@ -99,27 +93,6 @@ class DISPPARAMS(ctypes.Structure):
 
 HRESULT = c_long
 DISPID = c_long
-
-
-class EXCEPINFO(ctypes.Structure):
-    """What `IDispatch::Invoke` fills in when the object raises a COM exception.
-
-    Without this the only thing a caller learns is `DISP_E_EXCEPTION`; the
-    `scode` and `bstrDescription` are where SAPI says *why* (no audio endpoint,
-    no voice installed, device busy, ...).
-    """
-
-    _fields_ = [
-        ("wCode", c_ushort),
-        ("wReserved", c_ushort),
-        ("bstrSource", c_void_p),
-        ("bstrDescription", c_void_p),
-        ("bstrHelpFile", c_void_p),
-        ("dwHelpContext", c_uint),
-        ("pvReserved", c_void_p),
-        ("pfnDeferredFillIn", c_void_p),
-        ("scode", HRESULT),
-    ]
 
 
 class _IDispatchVtbl(ctypes.Structure):
@@ -176,48 +149,6 @@ def _clamp(value, low: int, high: int) -> int:
 
 def _hresult(hr: int) -> str:
     return f"0x{hr & 0xFFFFFFFF:08X}"
-
-
-class SapiError(OSError):
-    """The voice object rejected a call.
-
-    `hresult` is what `IDispatch::Invoke` returned; `scode` is what SAPI itself
-    reported, which is the interesting one when Invoke only wraps it as
-    `DISP_E_EXCEPTION`.  Both are attributes so callers can branch on them
-    instead of matching the message.
-    """
-
-    def __init__(
-        self,
-        member: str,
-        hresult: int,
-        *,
-        scode: int | None = None,
-        source: str = "",
-        description: str = "",
-    ):
-        self.member = member
-        self.hresult = hresult & 0xFFFFFFFF
-        self.scode = self.hresult if scode is None else scode & 0xFFFFFFFF
-        self.source = source
-        self.description = description
-        detail = f"{member} failed: {_hresult(hresult)}"
-        if self.hresult == DISP_E_EXCEPTION and self.scode != self.hresult:
-            detail += f" (DISP_E_EXCEPTION, scode {_hresult(self.scode)})"
-        if description:
-            detail += f": {description}"
-        elif source:
-            detail += f" [{source}]"
-        super().__init__(detail)
-
-    @property
-    def from_sapi(self) -> bool:
-        """True when the voice reported the failure, false for COM/marshalling faults.
-
-        SAPI's own errors live in `FACILITY_ITF` (0x8004xxxx); anything else came
-        from the COM layer and means our own plumbing is wrong.
-        """
-        return self.hresult == DISP_E_EXCEPTION or (self.scode & 0x1FFF0000) == 0x00040000
 
 
 class SapiEngine:
@@ -306,37 +237,12 @@ class SapiEngine:
         self._ids[name] = dispid.value
         return dispid.value
 
-    def _invoke(self, member: str, dispid: int, flags: int, params: DISPPARAMS) -> None:
-        info = EXCEPINFO()
+    def _invoke(self, dispid: int, flags: int, params: DISPPARAMS) -> None:
         hr = self._vtbl.Invoke(
-            self._dispatch, dispid, None, 0, flags, byref(params), byref(info), None, None
+            self._dispatch, dispid, None, 0, flags, byref(params), None, None, None
         )
-        if hr >= 0:
-            return
-        source, description = self._take_exception_text(info)
-        raise SapiError(
-            member,
-            hr,
-            scode=info.scode or info.wCode or None,
-            source=source,
-            description=description,
-        )
-
-    def _take_exception_text(self, info: EXCEPINFO) -> tuple[str, str]:
-        """Read the exception's source/description and release its BSTRs."""
-        source = ctypes.cast(info.bstrSource, c_wchar_p).value if info.bstrSource else ""
-        description = (
-            ctypes.cast(info.bstrDescription, c_wchar_p).value if info.bstrDescription else ""
-        )
-        for field in ("bstrSource", "bstrDescription", "bstrHelpFile"):
-            pointer = getattr(info, field)
-            if pointer:
-                setattr(info, field, None)
-                try:
-                    self._oleaut32.SysFreeString(pointer)
-                except Exception:  # pragma: no cover - defensive
-                    pass
-        return source or "", description or ""
+        if hr < 0:
+            raise OSError(f"IDispatch::Invoke failed: {_hresult(hr)}")
 
     def _set_property(self, name: str, value: int) -> None:
         args = (VARIANT * 1)(_variant_i4(value))
@@ -347,7 +253,7 @@ class SapiEngine:
             cArgs=1,
             cNamedArgs=1,
         )
-        self._invoke(name, self._dispid(name), DISPATCH_PROPERTYPUT, params)
+        self._invoke(self._dispid(name), DISPATCH_PROPERTYPUT, params)
 
     def _speak(self, text: str | None, flags: int) -> None:
         # DISPPARAMS wants the arguments in reverse order: (text, flags) → [flags, text].
@@ -369,7 +275,7 @@ class SapiEngine:
             cNamedArgs=0,
         )
         try:
-            self._invoke("Speak", self._dispid("Speak"), DISPATCH_METHOD, params)
+            self._invoke(self._dispid("Speak"), DISPATCH_METHOD, params)
         finally:
             if bstr:
                 self._oleaut32.SysFreeString(bstr)

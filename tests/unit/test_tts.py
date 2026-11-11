@@ -2,7 +2,8 @@
 
 No test here produces audio: the Windows engine is replaced by a fake that only
 records calls, and the real SAPI object is exercised by one smoke test that is
-allowed to skip when a machine has no voice installed.
+allowed to skip when a machine cannot speak — no voice registered, or no audio
+endpoint at all, as on a CI runner.
 """
 
 from __future__ import annotations
@@ -356,7 +357,7 @@ def test_an_engine_error_does_not_kill_the_worker():
 
 @pytest.mark.windows_only
 def test_sapi_engine_opens_and_closes():
-    from bark_pc.platform.windows.sapi import SapiEngine
+    from bark_pc.platform.windows.sapi import SapiEngine, SapiError
 
     try:
         engine = SapiEngine(rate=0, volume=100)
@@ -365,9 +366,61 @@ def test_sapi_engine_opens_and_closes():
     try:
         engine.set_rate(0)
         engine.set_volume(50)
-        engine.stop()
+        try:
+            engine.stop()
+        except SapiError as exc:
+            # A headless machine (a CI runner, a server) has no audio endpoint, so
+            # SAPI opens the voice but refuses to touch the device.  That is the
+            # environment talking, not our COM plumbing, and it must read as such.
+            assert exc.member == "Speak"
+            if not exc.from_sapi:  # pragma: no cover - marshalling bug, don't hide it
+                raise
+            pytest.skip(f"SAPI cannot speak here: {exc}")
     finally:
         engine.close()
+
+
+def test_sapi_errors_carry_the_voice_description():
+    from bark_pc.platform.windows.sapi import DISP_E_EXCEPTION, SapiError
+
+    error = SapiError(
+        "Speak",
+        DISP_E_EXCEPTION,
+        scode=0x8004503B - (1 << 32),  # SPERR_AUDIO_NOT_FOUND
+        source="SAPI.SpVoice",
+        description="No audio device was found.",
+    )
+
+    assert isinstance(error, OSError)
+    assert str(error) == (
+        "Speak failed: 0x80020009 (DISP_E_EXCEPTION, scode 0x8004503B): "
+        "No audio device was found."
+    )
+    assert (error.hresult, error.scode) == (0x80020009, 0x8004503B)
+    assert error.from_sapi is True
+
+
+def test_sapi_errors_distinguish_a_voice_problem_from_a_com_bug():
+    from bark_pc.platform.windows.sapi import SapiError
+
+    assert SapiError("Speak", 0x80070057).from_sapi is False  # E_INVALIDARG
+    assert SapiError("Speak", 0x8004503B - (1 << 32)).from_sapi is True  # SPERR_AUDIO_NOT_FOUND
+
+
+def test_exception_info_matches_the_native_layout():
+    import ctypes
+
+    from bark_pc.platform.windows.sapi import EXCEPINFO
+
+    # EXCEPINFO is filled in by SAPI in-process; a wrong layout means we read the
+    # reason for a failure out of whatever memory happens to follow it.
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        assert ctypes.sizeof(EXCEPINFO) == 64
+        assert (EXCEPINFO.bstrSource.offset, EXCEPINFO.bstrDescription.offset) == (8, 16)
+        assert EXCEPINFO.scode.offset == 56
+    else:
+        assert ctypes.sizeof(EXCEPINFO) == 32
+        assert (EXCEPINFO.bstrSource.offset, EXCEPINFO.scode.offset) == (4, 28)
 
 
 def test_variant_layout_matches_the_native_stride():

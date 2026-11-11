@@ -7,7 +7,7 @@ work.
 
 ## Automated evidence
 
-`python -m pytest tests/unit/test_tts.py` — 22 tests, no audio and no network:
+`python -m pytest tests/unit/test_tts.py` — 27 tests, no audio and no network:
 
 * **Spoken text** — title+body joined, body optional, subtitle-only pushes,
   `Hide preview text` collapses to "New notification", markdown images/links and
@@ -24,11 +24,14 @@ work.
   disables speech instead of raising, and one failing utterance does not kill the
   worker.
 * **Windows engine** — `SapiEngine` opens, sets `Rate`/`Volume`, purges and closes
-  (skipped when no SAPI voice is registered), and the `VARIANT` struct stride is
-  asserted to be 24 bytes on x64 / 16 bytes on x86, which is what makes
-  `DISPPARAMS` argument passing correct.
+  (skipped when no SAPI voice is registered, or when the machine has no audio
+  endpoint — a CI runner, a server — and SAPI refuses to `Speak`); the
+  `EXCEPINFO` struct is checked against the native layout so a refusal reports
+  SAPI's own `scode` and description instead of a bare `0x80020009`, and the
+  `VARIANT` struct stride is asserted to be 24 bytes on x64 / 16 bytes on x86,
+  which is what makes `DISPPARAMS` argument passing correct.
 
-Whole suite: `python -m pytest` — 303 tests, headless, offline, all passing.
+Whole suite: `python -m pytest` — 408 tests, headless, offline, all passing.
 
 `python -m ruff check bark_pc tests` — clean.
 

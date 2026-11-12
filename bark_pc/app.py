@@ -22,6 +22,12 @@ import anyio
 
 from .bark.links import ABANDON_NOTE, LinkManager
 from .bark.server_client import BarkServerClient, normalize_server_url, push_to_url
+from .bluetooth import (
+    BluetoothSinkWorker,
+    SinkState,
+    bluetooth_support,
+    list_sink_devices_sync,
+)
 from .core import models
 from .core.bus import BoundedEventQueue
 from .core.config import (
@@ -135,6 +141,7 @@ class BarkApp:
             log=self.log,
         )
         self._tts_preview = None
+        self.bluetooth = BluetoothSinkWorker(self.settings, log=self.log)
 
         self.events = BoundedEventQueue(maxsize=512)
         self.recent_payloads = RecentPayloadFilter()
@@ -195,6 +202,8 @@ class BarkApp:
         self._start_ingest()
         self._start_maintenance()
         self._prune_now()
+        if self.settings.bluetooth_enabled:
+            self.bluetooth.start()
 
         pending = self._pending_uri_action()
         if self._needs_setup():
@@ -888,6 +897,11 @@ class BarkApp:
             self.settings.tts_rate,
             self.settings.tts_volume,
         )
+        previous_bluetooth = (
+            self.settings.bluetooth_enabled,
+            self.settings.bluetooth_device_id,
+            self.settings.bluetooth_device_name,
+        )
         previous_log_level = self.settings.log_level
         self.settings = settings
         if previous_log_level != settings.log_level:
@@ -900,6 +914,12 @@ class BarkApp:
             self._rebuild_tts()
         if settings.autostart_enabled != self.autostart.is_enabled():
             self.apply_autostart(settings.autostart_enabled)
+        if previous_bluetooth != (
+            settings.bluetooth_enabled,
+            settings.bluetooth_device_id,
+            settings.bluetooth_device_name,
+        ):
+            self.bluetooth.configure(settings)
         if settings.silence_until and settings.silence_until > models.now_ms():
             if self.tray is not None:
                 self.tray.set_silenced(True)
@@ -1171,6 +1191,35 @@ class BarkApp:
 
     def _on_settings_closed(self) -> None:
         self.settings_dialog = None
+
+    # ------------------------------------------------------------------ #
+    # Bluetooth audio receiver (A2DP sink)
+    # ------------------------------------------------------------------ #
+    def bluetooth_support(self) -> tuple[bool, str]:
+        return bluetooth_support()
+
+    def bluetooth_devices(self):
+        """Paired A2DP devices for the settings dialog (may block briefly)."""
+        return list_sink_devices_sync()
+
+    def bluetooth_state(self) -> SinkState:
+        return self.bluetooth.state()
+
+    def bluetooth_connect(self, device_id: str, device_name: str = "") -> None:
+        self.bluetooth.connect_now(device_id, device_name)
+
+    def bluetooth_disconnect(self) -> None:
+        self.bluetooth.disconnect_now()
+
+    def open_bluetooth_settings(self) -> None:
+        """Open the Windows page where a phone is paired."""
+        starter = getattr(os, "startfile", None)
+        if starter is None:  # pragma: no cover - non-Windows
+            return
+        try:
+            starter("ms-settings:bluetooth")
+        except OSError as exc:  # pragma: no cover - shell association missing
+            self.log.warning("could not open Windows Bluetooth settings: %s", exc)
 
     def open_routing(self) -> None:
         if self.shell is None:
@@ -1478,6 +1527,7 @@ class BarkApp:
             self._maintenance_thread = None
         self.fetcher.shutdown(timeout=1.0)
         self.webhook_dispatcher.close(timeout=1.0)
+        self.bluetooth.stop(timeout=2.0)
         if self._tts_preview is not None:
             self._tts_preview.shutdown(timeout=0.5)
             self._tts_preview = None

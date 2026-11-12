@@ -355,6 +355,43 @@ it on in *Settings → Text-to-speech → Speak notifications aloud*, or toggle
 Speech is presentation only: if the system has no voice installed, the app logs
 `text-to-speech unavailable` and notifications carry on as before.
 
+## Bluetooth audio receiver (A2DP sink)
+
+Windows 10 (version 2004, build 19041) and later can act as a Bluetooth
+speaker, but Windows does not let the user start that mode on its own. The
+client adds the missing switch in *Settings → Bluetooth*: tick **Use this PC as
+a Bluetooth speaker (A2DP sink)**, choose the phone, and press **Connect** (or
+just save). Audio from the phone then plays on whatever output device Windows
+currently uses — headphones plugged into the PC included.
+
+This uses the same Windows API as the open-source
+[AudioPlaybackConnector](https://github.com/ysc3839/AudioPlaybackConnector)
+(`Windows.Media.Audio.AudioPlaybackConnection`). The Windows Bluetooth stack
+does the A2DP work; the client only enables and opens the connection, so there
+is no codec, audio decoder, virtual audio device or separate Bluetooth adapter
+involved.
+
+1. Pair the phone once in **Windows Settings → Bluetooth & devices** (or use
+   the *Windows Bluetooth settings* button in the dialog).
+2. Tick the option, pick the device, and save. *Refresh* re-reads the list if
+   the phone was paired while the dialog was open.
+3. The status line turns to **Receiving audio** while the phone streams.
+   **Disconnect** releases the connection so the phone can use its own speaker
+   again; the tray icon and push receiving keep working either way.
+
+Requirements and caveats:
+
+* Windows 10 2004 or newer, and a Bluetooth adapter/driver that supports A2DP
+  sink. Windows' own driver normally does; very old adapters may not expose the
+  interface, in which case no device appears in the list.
+* The PC becomes an audio *receiver*: volume and play/pause stay under the
+  phone's control. The Windows output volume still applies.
+* Android phones are the usual source; any device that can stream A2DP works.
+  iOS does not offer a way to send system audio to an A2DP sink.
+* The saved device is reconnected at the next launch while the option is on.
+  If Windows has since unpaired the phone, the status line reports the error and
+  *Refresh* shows the current device list.
+
 ## Where data lives
 
 History, images, logs and settings are kept in the per-user application-data

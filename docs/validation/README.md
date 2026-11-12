@@ -17,6 +17,7 @@ development container.
 | [US4.md](US4.md) | Images, cache, viewer | PARTIAL — fetch/cache unit-tested with a mocked transport |
 | [US5.md](US5.md) | Tray-first operation, autostart, single instance | PARTIAL — packaged-exe run verified; sign-out and 24 h run pending |
 | [TTS.md](TTS.md) | Spoken notifications (SAPI provider, settings, worker) | PARTIAL — logic and engine smoke-tested; listening check pending |
+| [Bluetooth.md](Bluetooth.md) | Bluetooth audio receiver / A2DP sink (WinRT, settings, worker) | PARTIAL — logic tested; real phone connection pending |
 | [perf.md](perf.md) | Warm start, idle footprint, latency | PARTIAL — start/memory measured; toast latency needs APNs |
 | [encoding.md](encoding.md) | CJK/RTL/emoji, truncation, DPI | PARTIAL — text verified by tests; visual DPI pending |
 | [security.md](security.md) | Secrets, logging, URL/URI handling | **PASS** (review + greps, see file) |

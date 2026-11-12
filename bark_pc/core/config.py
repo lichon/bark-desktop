@@ -33,6 +33,8 @@ WEBHOOK_ROUTES_FILENAME = "routes.json"
 SUPABASE_SCHEME = "sb"
 MAX_SUPABASE_KEY_LENGTH = 4096
 MAX_MESSAGE_ROUTE_URL_LENGTH = 2048
+MAX_BLUETOOTH_DEVICE_ID_LENGTH = 4096
+MAX_BLUETOOTH_DEVICE_NAME_LENGTH = 155
 
 LOG_LEVELS = ("debug", "info", "warning", "error")
 
@@ -231,6 +233,9 @@ class Settings:
     image_cache_mb: int = 200
     toasts_enabled: bool = True
     hide_preview_text: bool = False
+    bluetooth_enabled: bool = False
+    bluetooth_device_id: str = ""
+    bluetooth_device_name: str = ""
     tts_enabled: bool = False
     tts_provider: str = DEFAULT_TTS_PROVIDER
     tts_include_body: bool = True
@@ -328,6 +333,7 @@ class Settings:
                 "tts_include_body",
                 "tts_only_when_unlocked",
                 "supabase_enabled",
+                "bluetooth_enabled",
             ):
                 if isinstance(raw, bool):
                     return raw
@@ -340,6 +346,20 @@ class Settings:
                 if raw is None or raw == "":
                     return None
                 return str(raw)
+            if name == "bluetooth_device_id":
+                text = str(raw or "").strip()
+                if len(text) > MAX_BLUETOOTH_DEVICE_ID_LENGTH:
+                    raise ValueError(
+                        f"expected at most {MAX_BLUETOOTH_DEVICE_ID_LENGTH} characters"
+                    )
+                return text
+            if name == "bluetooth_device_name":
+                text = str(raw or "").strip()
+                if len(text) > MAX_BLUETOOTH_DEVICE_NAME_LENGTH:
+                    raise ValueError(
+                        f"expected at most {MAX_BLUETOOTH_DEVICE_NAME_LENGTH} characters"
+                    )
+                return text
             if name == "window_size":
                 if raw is None or raw == "":
                     return None

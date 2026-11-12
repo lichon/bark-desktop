@@ -65,6 +65,9 @@ COMMON_COLLECT_ALL = ("pystray", "pypush", "segno", "websockets")
 # (see docs/validation/spike_T2.md), so they must be listed explicitly.
 WINDOWS_HIDDEN_IMPORTS = (
     "winrt.windows.ui.notifications",
+    "winrt.windows.media.audio",
+    "winrt.windows.devices.enumeration",
+    "winrt.windows.storage.streams",
     "winrt.windows.foundation",
     "winrt.windows.foundation.collections",
     "winrt.windows.data.xml.dom",

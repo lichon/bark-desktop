@@ -7,6 +7,7 @@ import tkinter as tk
 from dataclasses import fields
 from tkinter import messagebox, ttk
 
+from ..bluetooth import BluetoothDeviceInfo, SinkState, SinkStatus, describe_state
 from ..core.config import (
     LOG_LEVELS,
     MESSAGE_ROUTE_BARK,
@@ -69,13 +70,16 @@ class SettingsDialog:
         self.notebook = ttk.Notebook(container)
         self.notebook.pack(fill="both", expand=True)
         connection = ttk.Frame(self.notebook, padding=(12, 10))
+        bluetooth = ttk.Frame(self.notebook, padding=(12, 10))
         notifications = ttk.Frame(self.notebook, padding=(12, 10))
         maintenance = ttk.Frame(self.notebook, padding=(12, 10))
         self.notebook.add(connection, text="Connection")
+        self.notebook.add(bluetooth, text="Bluetooth")
         self.notebook.add(notifications, text="Notifications")
         self.notebook.add(maintenance, text="Maintenance")
 
         self._build_connection_tab(connection)
+        self._build_bluetooth_tab(bluetooth)
         self._build_notifications_tab(notifications)
         self._build_maintenance_tab(maintenance)
 
@@ -180,6 +184,87 @@ class SettingsDialog:
             style="Muted.TLabel",
         ).grid(row=9, column=0, columnspan=2, sticky="w")
 
+        tab.columnconfigure(1, weight=1)
+
+    def _build_bluetooth_tab(self, tab: ttk.Frame) -> None:
+        self._bt_devices: list[tuple[str, BluetoothDeviceInfo]] = []
+        self._bluetooth_loaded = False
+        self._bluetooth_after_id: str | None = None
+        self._bluetooth_notice = ""
+
+        ttk.Label(tab, text="Bluetooth speaker", style="Subtitle.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        self.bluetooth_var = tk.BooleanVar()
+        self.bluetooth_check = ttk.Checkbutton(
+            tab,
+            text="Use this PC as a Bluetooth speaker (A2DP sink)",
+            variable=self.bluetooth_var,
+            command=self._toggle_bluetooth_fields,
+        )
+        self.bluetooth_check.grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            tab,
+            text="Receive audio from a phone or tablet that is paired with Windows. "
+            "The sound plays on whatever output device Windows is currently using.",
+            style="Muted.TLabel",
+            wraplength=460,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 8))
+
+        ttk.Label(tab, text="Paired device").grid(row=3, column=0, sticky="w")
+        self.bluetooth_device_var = tk.StringVar()
+        self.bluetooth_combo = ttk.Combobox(
+            tab,
+            textvariable=self.bluetooth_device_var,
+            state="disabled",
+            width=38,
+        )
+        self.bluetooth_combo.grid(row=3, column=1, sticky="ew", pady=2)
+        self.bluetooth_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._sync_bluetooth_buttons()
+        )
+
+        actions = ttk.Frame(tab)
+        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.bluetooth_refresh_button = ttk.Button(
+            actions, text="Refresh", command=self._refresh_bluetooth_devices
+        )
+        self.bluetooth_refresh_button.grid(row=0, column=0, sticky="w")
+        self.bluetooth_connect_button = ttk.Button(
+            actions, text="Connect", command=self._bluetooth_connect
+        )
+        self.bluetooth_connect_button.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.bluetooth_disconnect_button = ttk.Button(
+            actions, text="Disconnect", command=self._bluetooth_disconnect
+        )
+        self.bluetooth_disconnect_button.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        ttk.Button(
+            actions,
+            text="Bluetooth settings",
+            command=self._open_bluetooth_settings,
+        ).grid(row=0, column=3, sticky="w", padx=(6, 0))
+
+        ttk.Label(tab, text="Status").grid(row=5, column=0, sticky="nw", pady=(10, 0))
+        self.bluetooth_status_var = tk.StringVar(value="Off")
+        ttk.Label(
+            tab,
+            textvariable=self.bluetooth_status_var,
+            style="Muted.TLabel",
+            wraplength=380,
+            justify="left",
+        ).grid(row=5, column=1, sticky="w", pady=(10, 0))
+
+        ttk.Label(
+            tab,
+            text="Pair the phone in Windows Settings first (Windows 10 version 2004 "
+            "or later). Windows must expose an A2DP sink interface for it; after "
+            "pairing, press Refresh. Use Disconnect when you want the phone's own "
+            "speaker back.",
+            style="Muted.TLabel",
+            wraplength=460,
+            justify="left",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
         tab.columnconfigure(1, weight=1)
 
     def _build_notifications_tab(self, tab: ttk.Frame) -> None:
@@ -355,6 +440,9 @@ class SettingsDialog:
         self.cache_var.set(str(settings.image_cache_mb))
         self.toasts_var.set(bool(settings.toasts_enabled))
         self.hide_preview_var.set(bool(settings.hide_preview_text))
+        self.bluetooth_var.set(bool(settings.bluetooth_enabled))
+        self.bluetooth_device_var.set(settings.bluetooth_device_name or "")
+        self._toggle_bluetooth_fields()
         self.autostart_var.set(bool(settings.autostart_enabled))
         self.log_level_var.set(settings.log_level)
         self.tts_var.set(bool(settings.tts_enabled))
@@ -395,6 +483,16 @@ class SettingsDialog:
         silence_until = None
         if silence_choice in SILENCE_CHOICES and SILENCE_CHOICES[silence_choice]:
             silence_until = now_ms() + SILENCE_CHOICES[silence_choice]
+        bluetooth_device = self._selected_bluetooth()
+        if bluetooth_device is not None:
+            bluetooth_device_id = bluetooth_device.id
+            bluetooth_device_name = bluetooth_device.name
+        elif not self._bluetooth_loaded:
+            bluetooth_device_id = self.settings.bluetooth_device_id
+            bluetooth_device_name = self.settings.bluetooth_device_name
+        else:
+            bluetooth_device_id = ""
+            bluetooth_device_name = ""
         server_url = validate_server_url(self.server_var.get())
         if server_url.lower().startswith("sb://"):
             raise ValueError(
@@ -415,6 +513,9 @@ class SettingsDialog:
             "image_cache_mb": int(self.cache_var.get()),
             "toasts_enabled": bool(self.toasts_var.get()),
             "hide_preview_text": bool(self.hide_preview_var.get()),
+            "bluetooth_enabled": bool(self.bluetooth_var.get()),
+            "bluetooth_device_id": bluetooth_device_id,
+            "bluetooth_device_name": bluetooth_device_name,
             "tts_enabled": bool(self.tts_var.get()),
             "tts_provider": PROVIDER_LABEL_TO_NAME.get(
                 self.tts_provider_var.get(), DEFAULT_TTS_PROVIDER
@@ -428,6 +529,184 @@ class SettingsDialog:
             "log_level": self.log_level_var.get().strip() or self.settings.log_level,
             "last_connected_at": self.settings.last_connected_at,
         }
+
+    # -- Bluetooth tab ----------------------------------------------------- #
+    def _bluetooth_support(self) -> tuple[bool, str]:
+        probe = getattr(self.controller, "bluetooth_support", None)
+        if probe is None:
+            return False, "Bluetooth audio receiving is unavailable in this build."
+        try:
+            return probe()
+        except Exception as exc:  # pragma: no cover - defensive
+            return False, str(exc)
+
+    def _selected_bluetooth(self) -> BluetoothDeviceInfo | None:
+        label = self.bluetooth_device_var.get()
+        for choice_label, device in self._bt_devices:
+            if choice_label == label:
+                return device
+        return None
+
+    def _selected_bluetooth_id(self) -> str:
+        device = self._selected_bluetooth()
+        return device.id if device is not None else ""
+
+    def _refresh_bluetooth_devices(self, select_id: str | None = None) -> None:
+        self._bluetooth_loaded = True
+        if select_id is None:
+            selected = self._selected_bluetooth()
+            select_id = (
+                selected.id if selected is not None else self.settings.bluetooth_device_id
+            )
+        supported, reason = self._bluetooth_support()
+        if not supported:
+            self._bt_devices = []
+            self._bluetooth_notice = reason
+            self.bluetooth_check.configure(state="disabled")
+            self.bluetooth_combo.configure(values=[], state="disabled")
+            self.bluetooth_status_var.set(reason)
+            self._sync_bluetooth_buttons()
+            return
+        self.bluetooth_check.configure(state="normal")
+
+        devices: list[BluetoothDeviceInfo] = []
+        error = ""
+        lister = getattr(self.controller, "bluetooth_devices", None)
+        if lister is not None:
+            try:
+                devices, error = lister()
+            except Exception as exc:  # pragma: no cover - defensive
+                error = f"Could not list Bluetooth devices: {exc}"
+        saved_id = self.settings.bluetooth_device_id
+        if saved_id and all(device.id != saved_id for device in devices):
+            devices.append(
+                BluetoothDeviceInfo(
+                    id=saved_id,
+                    name=self.settings.bluetooth_device_name or "Saved Bluetooth device",
+                )
+            )
+
+        self._bt_devices = _device_choices(devices)
+        labels = [label for label, _ in self._bt_devices]
+        self.bluetooth_combo.configure(values=labels, state="readonly")
+        if select_id:
+            for index, (_label, device) in enumerate(self._bt_devices):
+                if device.id == select_id:
+                    self.bluetooth_combo.current(index)
+                    break
+            else:
+                if labels:
+                    self.bluetooth_combo.current(0)
+        elif labels:
+            self.bluetooth_combo.current(0)
+
+        if error:
+            self._bluetooth_notice = error
+            self.bluetooth_status_var.set(error)
+        elif not devices:
+            self._bluetooth_notice = (
+                "No paired Bluetooth audio device found. Pair the phone in Windows "
+                "Settings, then press Refresh."
+            )
+            self.bluetooth_status_var.set(self._bluetooth_notice)
+        else:
+            self._bluetooth_notice = ""
+            self.bluetooth_status_var.set("Select a device, then press Connect or save.")
+        self._sync_bluetooth_buttons()
+
+    def _toggle_bluetooth_fields(self) -> None:
+        self._sync_bluetooth_buttons()
+
+    def _sync_bluetooth_buttons(self, state: SinkState | None = None) -> None:
+        enabled = bool(self.bluetooth_var.get())
+        has_device = bool(self._bt_devices)
+        active = True if state is None else state.is_running
+        self.bluetooth_combo.configure(
+            state="readonly" if enabled and has_device else "disabled"
+        )
+        self.bluetooth_connect_button.configure(
+            state="normal" if enabled and has_device else "disabled"
+        )
+        self.bluetooth_disconnect_button.configure(
+            state="normal" if enabled and active else "disabled"
+        )
+
+    def _schedule_bluetooth_poll(self) -> None:
+        self._cancel_bluetooth_poll()
+        try:
+            self._bluetooth_after_id = self.window.after(300, self._poll_bluetooth)
+        except tk.TclError:  # pragma: no cover - window already gone
+            self._bluetooth_after_id = None
+
+    def _cancel_bluetooth_poll(self) -> None:
+        if self._bluetooth_after_id is None:
+            return
+        try:
+            self.window.after_cancel(self._bluetooth_after_id)
+        except Exception:  # pragma: no cover - already fired
+            pass
+        self._bluetooth_after_id = None
+
+    def _poll_bluetooth(self) -> None:
+        self._bluetooth_after_id = None
+        try:
+            if not self.window.winfo_exists():
+                return
+        except tk.TclError:  # pragma: no cover - window destroyed
+            return
+        if not self._bluetooth_loaded:
+            self._refresh_bluetooth_devices()
+        state = SinkState()
+        reader = getattr(self.controller, "bluetooth_state", None)
+        if reader is not None:
+            try:
+                state = reader()
+            except Exception:  # pragma: no cover - defensive
+                state = SinkState()
+        text = describe_state(state)
+        if state.status is SinkStatus.OFF and self._bluetooth_notice:
+            text = self._bluetooth_notice
+        self.bluetooth_status_var.set(text)
+        self._sync_bluetooth_buttons(state)
+        try:
+            self._bluetooth_after_id = self.window.after(700, self._poll_bluetooth)
+        except tk.TclError:  # pragma: no cover
+            self._bluetooth_after_id = None
+
+    def _bluetooth_connect(self) -> None:
+        device = self._selected_bluetooth()
+        if device is None:
+            messagebox.showinfo(
+                "Bluetooth speaker",
+                "Choose a paired Bluetooth device first.",
+                parent=self.window,
+            )
+            return
+        connect = getattr(self.controller, "bluetooth_connect", None)
+        if connect is None:
+            return
+        try:
+            connect(device.id, device.name)
+        except Exception as exc:  # pragma: no cover - defensive
+            messagebox.showerror("Bluetooth speaker", str(exc), parent=self.window)
+            return
+        self.bluetooth_status_var.set(f"Connecting to {device.label}…")
+
+    def _bluetooth_disconnect(self) -> None:
+        disconnect = getattr(self.controller, "bluetooth_disconnect", None)
+        if disconnect is None:
+            return
+        try:
+            disconnect()
+        except Exception as exc:  # pragma: no cover - defensive
+            messagebox.showerror("Bluetooth speaker", str(exc), parent=self.window)
+            return
+        self.bluetooth_status_var.set("Disconnecting…")
+
+    def _open_bluetooth_settings(self) -> None:
+        opener = getattr(self.controller, "open_bluetooth_settings", None)
+        if opener is not None:
+            opener()
 
     # -- actions ----------------------------------------------------------- #
     def _save(self) -> None:
@@ -447,6 +726,14 @@ class SettingsDialog:
             messagebox.showerror(
                 "Invalid setting",
                 "Supabase Realtime needs the auth key (anon/publishable key).",
+                parent=self.window,
+            )
+            return
+        if candidate["bluetooth_enabled"] and not candidate["bluetooth_device_id"]:
+            messagebox.showerror(
+                "Bluetooth speaker",
+                "Choose a paired Bluetooth device. If the list is empty, pair the "
+                "phone in Windows Settings and press Refresh.",
                 parent=self.window,
             )
             return
@@ -533,6 +820,7 @@ class SettingsDialog:
 
     def show(self) -> None:
         self.window.deiconify()
+        self._schedule_bluetooth_poll()
         self.window.lift()
         self.window.focus_force()
         # Without a visible owner the dialog can still open behind other
@@ -544,12 +832,27 @@ class SettingsDialog:
             pass
 
     def close(self) -> None:
+        self._cancel_bluetooth_poll()
         try:
             self.window.destroy()
         except Exception:  # pragma: no cover
             pass
         if self.on_closed is not None:
             self.on_closed()
+
+
+def _device_choices(
+    devices: list[BluetoothDeviceInfo],
+) -> list[tuple[str, BluetoothDeviceInfo]]:
+    """Give duplicate device names distinct labels while keeping the id mapping."""
+    seen: dict[str, int] = {}
+    choices: list[tuple[str, BluetoothDeviceInfo]] = []
+    for device in devices:
+        base = device.label
+        seen[base] = seen.get(base, 0) + 1
+        label = base if seen[base] == 1 else f"{base} ({seen[base]})"
+        choices.append((label, device))
+    return choices
 
 
 def settings_field_names() -> list[str]:

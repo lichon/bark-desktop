@@ -43,9 +43,9 @@ its own artifact as soon as the matching backend lands.
 3. Choose the Bark server:
    * **Public server** — `https://api.day.app` (default), or
    * **Self-hosted** — for example `http://127.0.0.1:8080`.
-4. Optionally tick **Supabase Realtime** and enter the project address
-   (`sb://<project-ref>.supabase.co`), the project's anon/publishable key and a
-   room name. The app then connects to the Bark server **and** the Realtime
+4. Optionally tick **Supabase Realtime** and paste the project URL
+   (`https://<project-ref>.supabase.co`), the project's anon/publishable key and
+   a room name. The app then connects to the Bark server **and** the Realtime
    room at the same time; the room is an extra transport, not a replacement.
 5. The wizard activates the device and registers a key with the Bark server. No
    Apple ID, password or 2FA prompt appears at any point.
@@ -98,7 +98,7 @@ to. Enter:
 
 | Field | Value |
 |-------|-------|
-| Project address | `sb://<project-ref>.supabase.co` (or `sb://https://<ref>.supabase.co`) |
+| Project URL | `https://<project-ref>.supabase.co` (a bare `<ref>.supabase.co` works too) |
 | Supabase auth key | the project's anon or publishable key (`sb_publishable_…`) |
 | Room name | the room to join, for example `alerts` |
 
@@ -141,7 +141,7 @@ together; an explicit `group` in the content always wins.
 
 The client authenticates the WebSocket with the key as the `apikey` query
 parameter, sends the Phoenix heartbeat, and reconnects with the same backoff as
-the APNs transport. Loopback projects (`sb://127.0.0.1:54321`) use plain `ws://`;
+the APNs transport. Loopback projects (`http://127.0.0.1:54321`) use plain `ws://`;
 hosted projects use `wss://`. *Check connection* verifies the project/key through
 Supabase's REST endpoint. *Test notification* / the wizard's self-test only
 pushes through the Bark server, never into the room, so one test never shows up
@@ -391,6 +391,123 @@ Requirements and caveats:
 * The saved device is reconnected at the next launch while the option is on.
   If Windows has since unpaired the phone, the status line reports the error and
   *Refresh* shows the current device list.
+
+## iPhone notifications (ANCS over USB Bluetooth)
+
+iOS only shares its Notification Center through Apple's Notification Center
+Service (ANCS). The client consumes it by driving a **separate USB Bluetooth
+adapter** with [Bumble](https://github.com/google/bumble), so new alerts arrive
+in the same history/toast/speech/webhook path as Bark pushes.
+
+This is independent of the A2DP sink above (same *Settings → Bluetooth* tab):
+both can be on at the same time. The Windows Bluetooth stack keeps handling
+audio while Bumble owns the USB dongle.
+
+Requirements:
+
+* A USB Bluetooth LE adapter (Bluetooth 4.0 or newer). While the option is on,
+  Bumble uses that adapter exclusively. A CSR8510-class dongle (the common
+  “USB Bluetooth 4.0 adapter”) needs no firmware upload and is the most
+  predictable choice; some Intel/Realtek radios need firmware files Bumble has
+  to find on disk.
+* On Windows, bind the adapter to the WinUSB driver with
+  [Zadig](https://zadig.akeo.ie/) (*Options → List All Devices*, pick the dongle,
+  choose **WinUSB**, then *Replace Driver*). The normal Windows Bluetooth driver
+  cannot be shared with Bumble, so use a second dongle (or keep the built-in
+  radio for Windows audio and pairing).
+* An iPhone with Bluetooth on and notification previews allowed.
+
+Steps:
+
+1. Open *Settings → Bluetooth → iPhone notifications*, press **Refresh**,
+   choose the USB adapter, tick the option, and save.
+2. On the iPhone open **Settings → Bluetooth**: the PC appears as
+   **Bark Desktop** under *Other Devices* / *Accessories*. Tap it there so the
+   iPhone connects, then allow pairing and notifications.
+3. The status line changes to **Receiving notifications from …**. New alerts are
+   stored with the source `ancs`; removing one on the iPhone leaves the history
+   row alone.
+4. The iPhone's LE address rotates for privacy. After the first bond the cached
+   IRK resolves it automatically; **Restart receiver** re-runs advertising when
+   the iPhone has forgotten the PC.
+
+The accessory also publishes **HID over GATT** (service
+`0x1812`) and advertises it, so iOS sees a keyboard it knows how to list. ANCS
+alone is often enough for the notification handshake but iOS may never show the
+device in Settings until it has a profile like HID to pair with — this is the
+well-tested trick from the DIY-watch community. The keyboard is not used to type
+anything unless asked to; the service only exists to make the accessory
+visible and to bring up a bonded, encrypted link.
+
+### Command-line probe
+
+`python -m bark_pc.tools.ancs_connect` walks the same steps outside the GUI
+(and can also scan in the opposite direction): it lists the USB adapters (or
+takes `--adapter usb:VVVV:PPPP`), scans, and prints **every** Bluetooth device
+it hears with its name, address and signal strength — Apple or not, so an unnamed or non-Apple device is never hidden. It
+then asks which one to use, pairs, subscribes and prints every notification it
+receives. Selecting a non-iPhone is allowed, but the ANCS subscription step will
+explain that the device does not expose Apple's notification service.
+
+| Option | Effect |
+|--------|--------|
+| `--list-adapters` | print the Bumble selectors and exit |
+| `--dump-advertising` | print the advertising PDU and scan response, element by element, and verify the 0x15 ANCS solicitation and the HID service (no dongle needed) |
+| `--no-hid` | drop the HID over GATT keyboard (`0x1812`) and its advertising entry; HID is on by default because iOS only reliably lists profiles it knows |
+| `--appearance 0x03C1` | advertised appearance; default `0x03C1` (Keyboard) with HID, `0x00C0` (*Generic Watch*) without, `0x0007` is *Eye-glasses* (see note below) |
+| `--mitm` | request passkey entry instead of Just Works; the passkey is printed and typed on the iPhone |
+| `--no-bonding` | do not store pairing keys (the iPhone must pair on every connect) |
+| `--peer AA:BB:…` | skip the picker and connect to that address |
+| `--scan-seconds` / `--scan-rounds` | size of each scan window and how many to try |
+| `--seconds 60` | stop listening after a time limit instead of Ctrl+C |
+| `--json` | one JSON object per notification (for scripts) |
+| `--non-interactive` | never prompt; take the best-ranked adapter and iPhone |
+
+The probe shares `<data>\bluetooth\ancs-keys.json`, so a bond made with it is
+reused by the app (and vice versa). Stop the app's receiver first: a dongle can
+only be opened by one process at a time.
+
+Four things an iPhone checks before it offers the notification service, all
+visible from the probe:
+
+1. **A profile iOS lists (HID).** The advertising PDU must carry AD type `0x03`
+   with service `0x1812` (*HID over GATT*) and the PC must serve that service.
+   This is the community-verified way to make iOS show the accessory at all;
+   without it the iPhone tends to ignore the device until a bond exists.
+2. **The 0x15 element.** The advertising PDU must carry AD type `0x15`
+   (128-bit *service solicitation*) with Apple's ANCS UUID
+   `7905F431-B5CE-4E99-A40F-4B1E122D00D0`. A `0x06`/`0x07` UUID list means the
+   opposite relationship (a service this device offers) and is not enough.
+   `--dump-advertising` prints both checks.
+3. **Appearance.** Cosmetic only: it selects the icon iOS shows.
+   `--appearance HEX` overrides the default. Note that the Bluetooth Assigned
+   Numbers assign *Generic Watch* to `0x00C0` (category `0x03` Watch); `0x0007`
+   is *Eye-glasses*, so an accessory advertising `0x0007` is still a valid ANCS
+   consumer but is labelled as glasses. With HID the default is `0x03C1`
+   (Keyboard).
+4. **Security.** ANCS needs an encrypted, bonded link. The default is Just Works
+   + bonding, which is all a display-less accessory can complete; `--mitm` asks
+   for passkey entry instead, and the negotiated `encrypted`/`authenticated`/
+   `key` values are printed after subscribing.
+
+Notes and caveats:
+
+* Scanning/connecting is the same direction a smartwatch uses: the iPhone is the
+  ANCS server (GATT server) and this PC is the ANCS client (BLE central). iOS
+  must be advertising for the first connection; keeping Settings → Bluetooth
+  open is the most reliable way to make it do so.
+* Only Notification Source and Data Source are consumed. Positive/negative
+  actions (accepting a call, replying) are not performed.
+* Notifications that already existed when the connection was established are
+  ignored, so reconnecting does not duplicate history.
+* Pairing keys are cached in `<data>\bluetooth\ancs-keys.json`, so the iPhone
+  normally asks only once. Deleting that file (or using *Remove all data*) makes
+  it ask again.
+* The adapter is opened through libusb, so Windows does not show it as a
+  Bluetooth radio while the receiver is running. Stop the option (or the app)
+  before using that dongle for anything else.
+* ANCS needs an iPhone; Android has no equivalent service. Android notifications
+  continue to arrive through the normal Bark push path.
 
 ## Where data lives
 

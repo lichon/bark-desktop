@@ -87,7 +87,7 @@ def describe_state(state: SinkState) -> str:
         return f"Connecting to {name}…"
     if state.status is SinkStatus.CONNECTED:
         name = state.device_name or "the Bluetooth device"
-        return f"Receiving audio from {name}. Windows plays it on the current output."
+        return f"Receiving audio from {name}."
     reason = state.error or state.detail or "unknown error"
     return f"Bluetooth error: {reason}"
 

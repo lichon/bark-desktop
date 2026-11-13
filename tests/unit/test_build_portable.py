@@ -59,6 +59,13 @@ def test_non_windows_targets_omit_winrt(target):
     assert "windows_toasts" not in target.collect_all
 
 
+def test_the_bluetooth_stack_is_bundled_on_every_platform():
+    for target in (bp.WINDOWS, bp.MACOS, bp.LINUX):
+        assert "libusb_package" in target.collect_all
+        assert "bumble.transport.usb" in target.hidden_imports
+        assert "bumble.profiles.ancs" in target.hidden_imports
+
+
 def test_build_command_selects_windowed_mode_and_icons(monkeypatch, tmp_path):
     monkeypatch.setattr(bp, "find_icon", lambda target, build_dir=None: None)
     command = bp.build_command(bp.WINDOWS, tmp_path / "dist", tmp_path / "build")
@@ -109,6 +116,8 @@ def test_frozen_import_smoke_test_follows_the_target():
     assert "windows_toasts" in windows
     assert "winrt.windows.foundation" not in linux
     assert "pypush.apns" in linux
+    assert "bumble.transport.usb" in windows
+    assert "bumble.transport.usb" in linux
 
 
 def test_archive_format_defaults_per_platform():

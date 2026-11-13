@@ -35,6 +35,8 @@ MAX_SUPABASE_KEY_LENGTH = 4096
 MAX_MESSAGE_ROUTE_URL_LENGTH = 2048
 MAX_BLUETOOTH_DEVICE_ID_LENGTH = 4096
 MAX_BLUETOOTH_DEVICE_NAME_LENGTH = 155
+MAX_ANCS_ADAPTER_LENGTH = 300
+MAX_ANCS_ADAPTER_NAME_LENGTH = 155
 
 LOG_LEVELS = ("debug", "info", "warning", "error")
 
@@ -236,6 +238,11 @@ class Settings:
     bluetooth_enabled: bool = False
     bluetooth_device_id: str = ""
     bluetooth_device_name: str = ""
+    # iPhone notifications over a dedicated USB Bluetooth adapter.  Bumble owns
+    # the dongle directly, so this is separate from the Windows A2DP sink above.
+    ancs_enabled: bool = False
+    ancs_adapter: str = ""
+    ancs_adapter_name: str = ""
     tts_enabled: bool = False
     tts_provider: str = DEFAULT_TTS_PROVIDER
     tts_include_body: bool = True
@@ -334,6 +341,7 @@ class Settings:
                 "tts_only_when_unlocked",
                 "supabase_enabled",
                 "bluetooth_enabled",
+                "ancs_enabled",
             ):
                 if isinstance(raw, bool):
                     return raw
@@ -358,6 +366,28 @@ class Settings:
                 if len(text) > MAX_BLUETOOTH_DEVICE_NAME_LENGTH:
                     raise ValueError(
                         f"expected at most {MAX_BLUETOOTH_DEVICE_NAME_LENGTH} characters"
+                    )
+                return text
+            if name == "ancs_adapter":
+                text = str(raw or "").strip()
+                if not text:
+                    return ""
+                if len(text) > MAX_ANCS_ADAPTER_LENGTH:
+                    raise ValueError(
+                        f"expected at most {MAX_ANCS_ADAPTER_LENGTH} characters"
+                    )
+                # Only a Bumble USB transport is accepted: a settings file must
+                # not be able to make the app open a network transport instead.
+                if not text.lower().startswith("usb:") or any(
+                    character.isspace() for character in text
+                ):
+                    raise ValueError("expected a usb: transport selector")
+                return text
+            if name == "ancs_adapter_name":
+                text = str(raw or "").strip()
+                if len(text) > MAX_ANCS_ADAPTER_NAME_LENGTH:
+                    raise ValueError(
+                        f"expected at most {MAX_ANCS_ADAPTER_NAME_LENGTH} characters"
                     )
                 return text
             if name == "window_size":
@@ -460,6 +490,24 @@ def validate_supabase_url(raw: str) -> str:
         else:
             text = f"{SUPABASE_SCHEME}://{text}"
     return _validate_supabase_url(text)
+
+
+def supabase_display_url(raw: str | None) -> str:
+    """The project URL shown in the UI for a stored Supabase address.
+
+    The address is kept internally as `sb://host` so it can never be confused
+    with the Bark server, but people paste and recognise the `https://` form,
+    so that is what the text fields show.  An empty value stays empty.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if not is_supabase_url(text):
+        return text
+    try:
+        return supabase_base_url(text)
+    except ValueError:
+        return text
 
 
 def validate_bark_push_url(raw: str) -> str:

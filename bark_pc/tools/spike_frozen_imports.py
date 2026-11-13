@@ -28,6 +28,10 @@ COMMON_MODULES = [
     "cryptography",
     "pypush",
     "pypush.apns",
+    "bumble",
+    "bumble.transport.usb",
+    "bumble.profiles.ancs",
+    "usb1",
 ]
 
 WINDOWS_MODULES = [

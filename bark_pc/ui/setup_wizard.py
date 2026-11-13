@@ -14,6 +14,8 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
 
+from ..core.config import supabase_display_url
+
 logger = logging.getLogger("bark_pc.ui.setup")
 
 PUBLIC_SERVER = "https://api.day.app"
@@ -123,7 +125,7 @@ class SetupWizard:
             variable=self.supabase_enabled_var,
             command=self._toggle_supabase_fields,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-        ttk.Label(self.supabase_frame, text="Project address").grid(
+        ttk.Label(self.supabase_frame, text="Project URL").grid(
             row=1, column=0, sticky="w"
         )
         self.supabase_url_entry = ttk.Entry(self.supabase_frame, width=42)
@@ -139,7 +141,7 @@ class SetupWizard:
         self.room_entry = ttk.Entry(self.supabase_frame, width=42)
         self.room_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
         self.supabase_frame.columnconfigure(1, weight=1)
-        self.supabase_url_entry.insert(0, current_supabase_url or "sb://")
+        self.supabase_url_entry.insert(0, supabase_display_url(current_supabase_url))
         self.supabase_key_entry.insert(0, current_supabase_key or "")
         self.room_entry.insert(0, current_supabase_topic or "bark")
 

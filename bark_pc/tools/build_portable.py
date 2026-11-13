@@ -57,9 +57,22 @@ COMMON_HIDDEN_IMPORTS = (
     "tkinter.messagebox",
     "PIL._tkinter_finder",
     "anyio._backends._asyncio",
+    "bumble.device",
+    "bumble.keys",
+    "bumble.pairing",
+    "bumble.profiles.ancs",
+    "bumble.transport.usb",
 )
 
-COMMON_COLLECT_ALL = ("pystray", "pypush", "segno", "websockets")
+COMMON_COLLECT_ALL = (
+    "pystray",
+    "pypush",
+    "segno",
+    "websockets",
+    # Bumble reaches the USB Bluetooth adapter through libusb; this package
+    # ships the libusb DLL that `bumble.transport.usb` loads at runtime.
+    "libusb_package",
+)
 
 # WinRT namespace packages and the pystray Win32 backend are imported by name
 # (see docs/validation/spike_T2.md), so they must be listed explicitly.

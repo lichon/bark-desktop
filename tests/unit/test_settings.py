@@ -9,6 +9,7 @@ from bark_pc.core.config import (
     LOG_LEVELS,
     Settings,
     SettingsStore,
+    supabase_display_url,
     validate_server_url,
     validate_supabase_url,
 )
@@ -175,6 +176,17 @@ def test_supabase_project_addresses_are_normalized():
     )
     assert validate_supabase_url("https://demo-project.supabase.co/") == (
         "sb://demo-project.supabase.co"
+    )
+
+
+def test_supabase_project_address_is_shown_as_a_plain_url():
+    assert supabase_display_url("") == ""
+    assert supabase_display_url("sb://demo-project.supabase.co") == (
+        "https://demo-project.supabase.co"
+    )
+    assert supabase_display_url("sb://127.0.0.1:54321") == "http://127.0.0.1:54321"
+    assert supabase_display_url("https://demo-project.supabase.co") == (
+        "https://demo-project.supabase.co"
     )
 
 

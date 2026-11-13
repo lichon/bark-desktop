@@ -24,6 +24,9 @@ dependencies = [
     "httpx>=0.27",
     "anyio>=4.0",
     "websockets>=13",
+    # ANCS (iPhone notifications) over a dedicated USB Bluetooth adapter.
+    # Bumble is pre-3.0 and its ANCS/profile APIs move; pin the tested release.
+    "bumble==0.0.236",
 ]
 
 [project.optional-dependencies]

@@ -7,7 +7,17 @@ import tkinter as tk
 from dataclasses import fields
 from tkinter import messagebox, ttk
 
-from ..bluetooth import BluetoothDeviceInfo, SinkState, SinkStatus, describe_state
+from ..bluetooth import (
+    AncsState,
+    AncsStatus,
+    BluetoothDeviceInfo,
+    SinkState,
+    SinkStatus,
+    UsbBluetoothAdapter,
+    current_platform_note,
+    describe_ancs_state,
+    describe_state,
+)
 from ..core.config import (
     LOG_LEVELS,
     MESSAGE_ROUTE_BARK,
@@ -16,6 +26,7 @@ from ..core.config import (
     MESSAGE_ROUTE_REALTIME,
     MESSAGE_ROUTES,
     Settings,
+    supabase_display_url,
     validate_bark_push_url,
     validate_server_url,
     validate_supabase_url,
@@ -31,6 +42,18 @@ SILENCE_CHOICES = {
     "For 4 hours": 4 * 60 * 60 * 1000,
     "Until tomorrow": 24 * 60 * 60 * 1000,
 }
+
+# Live Bluetooth status lines share one row; the full text stays in the source
+# variable, but the label only shows a single clipped line so it never wraps.
+STATUS_MAX_CHARS = 48
+
+
+def _one_line_status(text: str) -> str:
+    """Collapse whitespace and cap a status message to one line."""
+    line = " ".join(str(text or "").split())
+    if len(line) <= STATUS_MAX_CHARS:
+        return line
+    return line[: STATUS_MAX_CHARS - 1].rstrip() + "…"
 
 
 class SettingsDialog:
@@ -57,7 +80,7 @@ class SettingsDialog:
         """Size the window to its widgets so no control is ever clipped."""
         self.window.update_idletasks()
         width = self.window.winfo_reqwidth()
-        height = min(self.window.winfo_reqheight(), self.window.winfo_screenheight() - 80)
+        height = min(self.window.winfo_reqheight() + 80, self.window.winfo_screenheight() - 80)
         x = max(0, (self.window.winfo_screenwidth() - width) // 2)
         y = max(0, (self.window.winfo_screenheight() - height) // 2)
         self.window.geometry(f"{width}x{height}+{x}+{y}")
@@ -83,9 +106,7 @@ class SettingsDialog:
         self._build_notifications_tab(notifications)
         self._build_maintenance_tab(maintenance)
 
-        self.status_label = ttk.Label(
-            container, text="", style="Muted.TLabel", wraplength=520
-        )
+        self.status_label = ttk.Label(container, text="", style="Muted.TLabel")
         self.status_label.pack(anchor="w", pady=(6, 0))
 
         buttons = ttk.Frame(container)
@@ -110,46 +131,51 @@ class SettingsDialog:
             row=2, column=1, sticky="ew", pady=2
         )
 
-        self.supabase_frame = ttk.LabelFrame(
-            tab, text="Supabase Realtime (optional)", padding=(8, 4)
+        ttk.Separator(tab).grid(row=3, column=0, columnspan=2, sticky="ew", pady=6)
+
+        ttk.Label(tab, text="Supabase Realtime (optional)", style="Subtitle.TLabel").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        self.supabase_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 2))
         self.supabase_enabled_var = tk.BooleanVar()
         ttk.Checkbutton(
-            self.supabase_frame,
+            tab,
             text="Receive broadcasts from a Supabase Realtime room",
             variable=self.supabase_enabled_var,
             command=self._toggle_supabase_fields,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(self.supabase_frame, text="Project address").grid(
-            row=1, column=0, sticky="w", pady=(4, 0)
+        ).grid(row=5, column=0, columnspan=2, sticky="w")
+        ttk.Label(tab, text="Project URL").grid(
+            row=6, column=0, sticky="w", pady=(4, 0)
         )
         self.supabase_url_var = tk.StringVar()
         self.supabase_url_entry = ttk.Entry(
-            self.supabase_frame, textvariable=self.supabase_url_var, width=34
+            tab, textvariable=self.supabase_url_var, width=34
         )
-        self.supabase_url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
-        ttk.Label(self.supabase_frame, text="Auth key").grid(row=2, column=0, sticky="w")
+        self.supabase_url_entry.grid(row=6, column=1, sticky="ew", pady=(4, 0))
+        ttk.Label(tab, text="Auth key").grid(row=7, column=0, sticky="w")
         self.supabase_key_var = tk.StringVar()
         self.supabase_key_entry = ttk.Entry(
-            self.supabase_frame, textvariable=self.supabase_key_var, width=34, show="*"
+            tab, textvariable=self.supabase_key_var, width=34, show="*"
         )
-        self.supabase_key_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0))
-        ttk.Label(self.supabase_frame, text="Room name").grid(row=3, column=0, sticky="w")
+        self.supabase_key_entry.grid(row=7, column=1, sticky="ew")
+        ttk.Label(tab, text="Room name").grid(row=8, column=0, sticky="w")
         self.supabase_topic_var = tk.StringVar()
         self.supabase_topic_entry = ttk.Entry(
-            self.supabase_frame, textvariable=self.supabase_topic_var, width=34
+            tab, textvariable=self.supabase_topic_var, width=34
         )
-        self.supabase_topic_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0))
-        self.supabase_frame.columnconfigure(1, weight=1)
+        self.supabase_topic_entry.grid(row=8, column=1, sticky="ew")
+        ttk.Label(
+            tab,
+            text="For example https://project.supabase.co",
+            style="Muted.TLabel",
+        ).grid(row=9, column=0, columnspan=2, sticky="w")
 
-        ttk.Separator(tab).grid(row=4, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=10, column=0, columnspan=2, sticky="ew", pady=6)
 
-        ttk.Label(tab, text="Message send", style="Subtitle.TLabel").grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        ttk.Label(tab, text="Compose-bar send", style="Subtitle.TLabel").grid(
+            row=11, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Label(tab, text="Send compose-bar messages to").grid(
-            row=6, column=0, sticky="w"
+        ttk.Label(tab, text="Target").grid(
+            row=12, column=0, sticky="w"
         )
         self.route_var = tk.StringVar()
         self.route_combo = ttk.Combobox(
@@ -159,19 +185,19 @@ class SettingsDialog:
             state="readonly",
             width=24,
         )
-        self.route_combo.grid(row=6, column=1, sticky="w", pady=2)
+        self.route_combo.grid(row=12, column=1, sticky="w", pady=2)
         self.route_combo.bind(
             "<<ComboboxSelected>>", lambda _event: self._toggle_route_fields()
         )
-        ttk.Label(tab, text="Bark URL (device key included)").grid(
-            row=7, column=0, sticky="w"
+        ttk.Label(tab, text="Bark URL").grid(
+            row=13, column=0, sticky="w"
         )
         self.route_url_var = tk.StringVar()
         self.route_url_entry = ttk.Entry(tab, textvariable=self.route_url_var, width=34)
-        self.route_url_entry.grid(row=7, column=1, sticky="ew", pady=2)
+        self.route_url_entry.grid(row=13, column=1, sticky="ew", pady=2)
 
         route_actions = ttk.Frame(tab)
-        route_actions.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        route_actions.grid(row=14, column=0, columnspan=2, sticky="w", pady=(2, 0))
         ttk.Label(
             route_actions,
             text="For example https://api.day.app/<device_key>",
@@ -182,8 +208,10 @@ class SettingsDialog:
             tab,
             text="Leave it empty to push to this device's own device key.",
             style="Muted.TLabel",
-        ).grid(row=9, column=0, columnspan=2, sticky="w")
+        ).grid(row=15, column=0, columnspan=2, sticky="w")
 
+        # Only the input column grows: labels keep the left edge, entries run
+        # all the way to the window's right edge.
         tab.columnconfigure(1, weight=1)
 
     def _build_bluetooth_tab(self, tab: ttk.Frame) -> None:
@@ -191,8 +219,11 @@ class SettingsDialog:
         self._bluetooth_loaded = False
         self._bluetooth_after_id: str | None = None
         self._bluetooth_notice = ""
+        self._ancs_adapters: list[tuple[str, UsbBluetoothAdapter]] = []
+        self._ancs_loaded = False
+        self._ancs_notice = ""
 
-        ttk.Label(tab, text="Bluetooth speaker", style="Subtitle.TLabel").grid(
+        ttk.Label(tab, text="Bluetooth audio", style="Subtitle.TLabel").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         self.bluetooth_var = tk.BooleanVar()
@@ -203,16 +234,8 @@ class SettingsDialog:
             command=self._toggle_bluetooth_fields,
         )
         self.bluetooth_check.grid(row=1, column=0, columnspan=2, sticky="w")
-        ttk.Label(
-            tab,
-            text="Receive audio from a phone or tablet that is paired with Windows. "
-            "The sound plays on whatever output device Windows is currently using.",
-            style="Muted.TLabel",
-            wraplength=460,
-            justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
-        ttk.Label(tab, text="Paired device").grid(row=3, column=0, sticky="w")
+        ttk.Label(tab, text="Paired device").grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.bluetooth_device_var = tk.StringVar()
         self.bluetooth_combo = ttk.Combobox(
             tab,
@@ -220,13 +243,13 @@ class SettingsDialog:
             state="disabled",
             width=38,
         )
-        self.bluetooth_combo.grid(row=3, column=1, sticky="ew", pady=2)
+        self.bluetooth_combo.grid(row=2, column=1, sticky="ew", pady=(4, 0))
         self.bluetooth_combo.bind(
             "<<ComboboxSelected>>", lambda _event: self._sync_bluetooth_buttons()
         )
 
         actions = ttk.Frame(tab)
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.bluetooth_refresh_button = ttk.Button(
             actions, text="Refresh", command=self._refresh_bluetooth_devices
         )
@@ -245,27 +268,88 @@ class SettingsDialog:
             command=self._open_bluetooth_settings,
         ).grid(row=0, column=3, sticky="w", padx=(6, 0))
 
-        ttk.Label(tab, text="Status").grid(row=5, column=0, sticky="nw", pady=(10, 0))
+        ttk.Label(tab, text="Status").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.bluetooth_status_var = tk.StringVar(value="Off")
+        self.bluetooth_status_display_var = self._status_display(
+            self.bluetooth_status_var
+        )
         ttk.Label(
             tab,
-            textvariable=self.bluetooth_status_var,
+            textvariable=self.bluetooth_status_display_var,
             style="Muted.TLabel",
-            wraplength=380,
-            justify="left",
-        ).grid(row=5, column=1, sticky="w", pady=(10, 0))
+        ).grid(row=4, column=1, sticky="w", pady=(8, 0))
 
         ttk.Label(
             tab,
-            text="Pair the phone in Windows Settings first (Windows 10 version 2004 "
-            "or later). Windows must expose an A2DP sink interface for it; after "
-            "pairing, press Refresh. Use Disconnect when you want the phone's own "
-            "speaker back.",
+            text="Pair the phone in system first, then press Refresh.",
             style="Muted.TLabel",
-            wraplength=460,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        ttk.Separator(tab).grid(row=6, column=0, columnspan=2, sticky="ew", pady=10)
+
+        ttk.Label(tab, text="iOS notifications (ANCS)", style="Subtitle.TLabel").grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        self.ancs_var = tk.BooleanVar()
+        self.ancs_check = ttk.Checkbutton(
+            tab,
+            text="Receive iOS notifications",
+            variable=self.ancs_var,
+            command=self._toggle_ancs_fields,
+        )
+        self.ancs_check.grid(row=8, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(tab, text="USB Bluetooth adapter").grid(
+            row=9, column=0, sticky="w", pady=(4, 0)
+        )
+        self.ancs_adapter_var = tk.StringVar()
+        self.ancs_combo = ttk.Combobox(
+            tab,
+            textvariable=self.ancs_adapter_var,
+            state="disabled",
+            width=38,
+        )
+        self.ancs_combo.grid(row=9, column=1, sticky="ew", pady=(4, 0))
+        self.ancs_combo.bind(
+            "<<ComboboxSelected>>", lambda _event: self._sync_ancs_buttons()
+        )
+
+        ancs_actions = ttk.Frame(tab)
+        ancs_actions.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.ancs_refresh_button = ttk.Button(
+            ancs_actions, text="Refresh", command=self._refresh_ancs_adapters
+        )
+        self.ancs_refresh_button.grid(row=0, column=0, sticky="w")
+        self.ancs_restart_button = ttk.Button(
+            ancs_actions, text="Restart receiver", command=self._restart_ancs
+        )
+        self.ancs_restart_button.grid(row=0, column=1, sticky="w", padx=(6, 0))
+
+        ttk.Label(tab, text="Status").grid(row=11, column=0, sticky="w", pady=(8, 0))
+        self.ancs_status_var = tk.StringVar(value="Off")
+        self.ancs_status_display_var = self._status_display(self.ancs_status_var)
+        ttk.Label(
+            tab,
+            textvariable=self.ancs_status_display_var,
+            style="Muted.TLabel",
+        ).grid(row=11, column=1, sticky="w", pady=(8, 0))
+
+        self.ancs_hint_var = tk.StringVar(value=current_platform_note())
+        ttk.Label(
+            tab,
+            textvariable=self.ancs_hint_var,
+            style="Muted.TLabel",
             justify="left",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(4, 0))
         tab.columnconfigure(1, weight=1)
+
+    def _status_display(self, source: tk.StringVar) -> tk.StringVar:
+        """A single-line view of *source*; the full text stays in the source var."""
+        display = tk.StringVar(value=_one_line_status(source.get()))
+        source.trace_add(
+            "write", lambda *_args: display.set(_one_line_status(source.get()))
+        )
+        return display
 
     def _build_notifications_tab(self, tab: ttk.Frame) -> None:
         ttk.Label(tab, text="History and images", style="Subtitle.TLabel").grid(
@@ -296,7 +380,7 @@ class SettingsDialog:
         )
         self.toasts_var = tk.BooleanVar()
         ttk.Checkbutton(
-            tab, text="Show Windows notifications", variable=self.toasts_var
+            tab, text="Show system notifications", variable=self.toasts_var
         ).grid(row=6, column=0, columnspan=2, sticky="w")
         self.hide_preview_var = tk.BooleanVar()
         ttk.Checkbutton(
@@ -317,7 +401,7 @@ class SettingsDialog:
         ).grid(row=8, column=1, sticky="w", pady=(2, 0))
         self.autostart_var = tk.BooleanVar()
         ttk.Checkbutton(
-            tab, text="Start with Windows (no admin rights)", variable=self.autostart_var
+            tab, text="Start with system (no admin rights)", variable=self.autostart_var
         ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         ttk.Separator(tab).grid(row=10, column=0, columnspan=2, sticky="ew", pady=6)
@@ -354,15 +438,15 @@ class SettingsDialog:
         ttk.Label(voice, text="rate / volume", style="Muted.TLabel").pack(
             side="left", padx=(6, 0)
         )
-        ttk.Button(voice, text="Test voice", command=self._test_voice).pack(
-            side="left", padx=(10, 0)
-        )
         self.tts_unlocked_var = tk.BooleanVar()
         ttk.Checkbutton(
             tab,
             text="Only read aloud while the screen is unlocked",
             variable=self.tts_unlocked_var,
         ).grid(row=14, column=0, columnspan=2, sticky="w")
+        ttk.Button(tab, text="Test voice", command=self._test_voice).grid(
+            row=15, column=0, sticky="w", pady=(6, 0)
+        )
 
         tab.columnconfigure(1, weight=1)
 
@@ -372,10 +456,8 @@ class SettingsDialog:
         )
         ttk.Label(
             tab,
-            text="Check the configured server, collect logs for support, or remove "
-            "stored messages and this device's registration.",
+            text="Check the configured server, collect logs for support",
             style="Muted.TLabel",
-            wraplength=440,
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
         actions = ttk.Frame(tab)
@@ -413,7 +495,6 @@ class SettingsDialog:
             tab,
             text="Debug also records every outbound HTTP request and response.",
             style="Muted.TLabel",
-            wraplength=440,
             justify="left",
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
         tab.columnconfigure(1, weight=1)
@@ -424,7 +505,7 @@ class SettingsDialog:
         self.server_var.set(settings.server_url)
         self.topic_var.set(settings.push_topic)
         self.supabase_enabled_var.set(bool(settings.supabase_enabled))
-        self.supabase_url_var.set(settings.supabase_url)
+        self.supabase_url_var.set(supabase_display_url(settings.supabase_url))
         self.supabase_key_var.set(settings.supabase_key)
         self.supabase_topic_var.set(settings.supabase_topic or "bark")
         self._toggle_supabase_fields()
@@ -443,6 +524,9 @@ class SettingsDialog:
         self.bluetooth_var.set(bool(settings.bluetooth_enabled))
         self.bluetooth_device_var.set(settings.bluetooth_device_name or "")
         self._toggle_bluetooth_fields()
+        self.ancs_var.set(bool(settings.ancs_enabled))
+        self.ancs_adapter_var.set(settings.ancs_adapter_name or "")
+        self._sync_ancs_buttons()
         self.autostart_var.set(bool(settings.autostart_enabled))
         self.log_level_var.set(settings.log_level)
         self.tts_var.set(bool(settings.tts_enabled))
@@ -493,6 +577,16 @@ class SettingsDialog:
         else:
             bluetooth_device_id = ""
             bluetooth_device_name = ""
+        ancs_adapter = self._selected_ancs_adapter()
+        if ancs_adapter is not None:
+            ancs_adapter_id = ancs_adapter.selector
+            ancs_adapter_name = ancs_adapter.name
+        elif not self._ancs_loaded:
+            ancs_adapter_id = self.settings.ancs_adapter
+            ancs_adapter_name = self.settings.ancs_adapter_name
+        else:
+            ancs_adapter_id = ""
+            ancs_adapter_name = ""
         server_url = validate_server_url(self.server_var.get())
         if server_url.lower().startswith("sb://"):
             raise ValueError(
@@ -516,6 +610,9 @@ class SettingsDialog:
             "bluetooth_enabled": bool(self.bluetooth_var.get()),
             "bluetooth_device_id": bluetooth_device_id,
             "bluetooth_device_name": bluetooth_device_name,
+            "ancs_enabled": bool(self.ancs_var.get()),
+            "ancs_adapter": ancs_adapter_id,
+            "ancs_adapter_name": ancs_adapter_name,
             "tts_enabled": bool(self.tts_var.get()),
             "tts_provider": PROVIDER_LABEL_TO_NAME.get(
                 self.tts_provider_var.get(), DEFAULT_TTS_PROVIDER
@@ -605,13 +702,12 @@ class SettingsDialog:
             self.bluetooth_status_var.set(error)
         elif not devices:
             self._bluetooth_notice = (
-                "No paired Bluetooth audio device found. Pair the phone in Windows "
-                "Settings, then press Refresh."
+                "No paired device found. Pair it in system, then press Refresh."
             )
             self.bluetooth_status_var.set(self._bluetooth_notice)
         else:
             self._bluetooth_notice = ""
-            self.bluetooth_status_var.set("Select a device, then press Connect or save.")
+            self.bluetooth_status_var.set("Select a device, then press Connect.")
         self._sync_bluetooth_buttons()
 
     def _toggle_bluetooth_fields(self) -> None:
@@ -668,6 +764,21 @@ class SettingsDialog:
             text = self._bluetooth_notice
         self.bluetooth_status_var.set(text)
         self._sync_bluetooth_buttons(state)
+
+        if not self._ancs_loaded and self.ancs_var.get():
+            self._refresh_ancs_adapters()
+        ancs_state = AncsState()
+        ancs_reader = getattr(self.controller, "ancs_state", None)
+        if ancs_reader is not None:
+            try:
+                ancs_state = ancs_reader()
+            except Exception:  # pragma: no cover - defensive
+                ancs_state = AncsState()
+        ancs_text = describe_ancs_state(ancs_state)
+        if ancs_state.status is AncsStatus.OFF and self._ancs_notice:
+            ancs_text = self._ancs_notice
+        self.ancs_status_var.set(ancs_text)
+        self._sync_ancs_buttons(ancs_state)
         try:
             self._bluetooth_after_id = self.window.after(700, self._poll_bluetooth)
         except tk.TclError:  # pragma: no cover
@@ -708,6 +819,113 @@ class SettingsDialog:
         if opener is not None:
             opener()
 
+    # -- ANCS (iOS notifications) -------------------------------------- #
+    def _ancs_support(self) -> tuple[bool, str]:
+        probe = getattr(self.controller, "ancs_support", None)
+        if probe is None:
+            return False, "iOS notifications over Bluetooth are unavailable in this build."
+        try:
+            return probe()
+        except Exception as exc:  # pragma: no cover - defensive
+            return False, str(exc)
+
+    def _selected_ancs_adapter(self) -> UsbBluetoothAdapter | None:
+        label = self.ancs_adapter_var.get()
+        for choice_label, adapter in self._ancs_adapters:
+            if choice_label == label:
+                return adapter
+        return None
+
+    def _refresh_ancs_adapters(self, select_selector: str | None = None) -> None:
+        self._ancs_loaded = True
+        if select_selector is None:
+            selected = self._selected_ancs_adapter()
+            select_selector = (
+                selected.selector if selected is not None else self.settings.ancs_adapter
+            )
+        supported, reason = self._ancs_support()
+        if not supported:
+            self._ancs_adapters = []
+            self._ancs_notice = reason
+            self.ancs_check.configure(state="disabled")
+            self.ancs_combo.configure(values=[], state="disabled")
+            self.ancs_status_var.set(reason)
+            self._sync_ancs_buttons()
+            return
+        self.ancs_check.configure(state="normal")
+
+        adapters: list[UsbBluetoothAdapter] = []
+        error = ""
+        lister = getattr(self.controller, "ancs_adapters", None)
+        if lister is not None:
+            try:
+                adapters, error = lister()
+            except Exception as exc:  # pragma: no cover - defensive
+                error = f"Could not list USB Bluetooth adapters: {exc}"
+        saved_selector = self.settings.ancs_adapter
+        if saved_selector and all(
+            adapter.selector != saved_selector for adapter in adapters
+        ):
+            adapters.append(
+                UsbBluetoothAdapter(
+                    selector=saved_selector,
+                    name=self.settings.ancs_adapter_name or "Saved USB Bluetooth adapter",
+                    vendor_id=0,
+                    product_id=0,
+                )
+            )
+
+        self._ancs_adapters = _adapter_choices(adapters)
+        labels = [label for label, _adapter in self._ancs_adapters]
+        self.ancs_combo.configure(values=labels, state="readonly")
+        if select_selector:
+            for index, (_label, adapter) in enumerate(self._ancs_adapters):
+                if adapter.selector == select_selector:
+                    self.ancs_combo.current(index)
+                    break
+            else:
+                if labels:
+                    self.ancs_combo.current(0)
+        elif labels:
+            self.ancs_combo.current(0)
+
+        if error:
+            self._ancs_notice = error
+            self.ancs_status_var.set(error)
+        elif not adapters:
+            self._ancs_notice = (
+                "No USB Bluetooth adapter found. Plug one in and press Refresh."
+            )
+            self.ancs_status_var.set(self._ancs_notice)
+        else:
+            self._ancs_notice = ""
+            self.ancs_status_var.set("Select an adapter, then save.")
+        self._sync_ancs_buttons()
+
+    def _toggle_ancs_fields(self) -> None:
+        if self.ancs_var.get() and not self._ancs_loaded:
+            self._refresh_ancs_adapters()
+        self._sync_ancs_buttons()
+
+    def _sync_ancs_buttons(self, state: AncsState | None = None) -> None:
+        enabled = bool(self.ancs_var.get())
+        has_adapter = bool(self._ancs_adapters)
+        self.ancs_combo.configure(
+            state="readonly" if enabled and has_adapter else "disabled"
+        )
+        self.ancs_restart_button.configure(state="normal" if enabled else "disabled")
+
+    def _restart_ancs(self) -> None:
+        restart = getattr(self.controller, "ancs_restart", None)
+        if restart is None:
+            return
+        try:
+            restart()
+        except Exception as exc:  # pragma: no cover - defensive
+            messagebox.showerror("iOS notifications", str(exc), parent=self.window)
+            return
+        self.ancs_status_var.set("Restarting the receiver…")
+
     # -- actions ----------------------------------------------------------- #
     def _save(self) -> None:
         try:
@@ -718,7 +936,7 @@ class SettingsDialog:
         if candidate["supabase_enabled"] and not candidate["supabase_url"]:
             messagebox.showerror(
                 "Invalid setting",
-                "Enter the Supabase project address (sb://project.supabase.co).",
+                "Enter the Supabase project URL (https://project.supabase.co).",
                 parent=self.window,
             )
             return
@@ -733,7 +951,15 @@ class SettingsDialog:
             messagebox.showerror(
                 "Bluetooth speaker",
                 "Choose a paired Bluetooth device. If the list is empty, pair the "
-                "phone in Windows Settings and press Refresh.",
+                "phone in Bluetooth Settings and press Refresh.",
+                parent=self.window,
+            )
+            return
+        if candidate["ancs_enabled"] and not candidate["ancs_adapter"]:
+            messagebox.showerror(
+                "iOS notifications",
+                "Choose the USB Bluetooth adapter that Bumble should use. If the "
+                "list is empty, plug the adapter in and press Refresh.",
                 parent=self.window,
             )
             return
@@ -852,6 +1078,20 @@ def _device_choices(
         seen[base] = seen.get(base, 0) + 1
         label = base if seen[base] == 1 else f"{base} ({seen[base]})"
         choices.append((label, device))
+    return choices
+
+
+def _adapter_choices(
+    adapters: list[UsbBluetoothAdapter],
+) -> list[tuple[str, UsbBluetoothAdapter]]:
+    """Same idea for USB adapters: two identical dongles stay distinguishable."""
+    seen: dict[str, int] = {}
+    choices: list[tuple[str, UsbBluetoothAdapter]] = []
+    for adapter in adapters:
+        base = adapter.label
+        seen[base] = seen.get(base, 0) + 1
+        label = base if seen[base] == 1 else f"{base} ({seen[base]})"
+        choices.append((label, adapter))
     return choices
 
 

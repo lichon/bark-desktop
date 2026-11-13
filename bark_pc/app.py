@@ -23,10 +23,15 @@ import anyio
 from .bark.links import ABANDON_NOTE, LinkManager
 from .bark.server_client import BarkServerClient, normalize_server_url, push_to_url
 from .bluetooth import (
+    AncsNotification,
+    AncsState,
+    AncsWorker,
     BluetoothSinkWorker,
     SinkState,
+    bluetooth_hci_support,
     bluetooth_support,
     list_sink_devices_sync,
+    list_usb_bluetooth_adapters,
 )
 from .core import models
 from .core.bus import BoundedEventQueue
@@ -142,6 +147,12 @@ class BarkApp:
         )
         self._tts_preview = None
         self.bluetooth = BluetoothSinkWorker(self.settings, log=self.log)
+        self.ancs = AncsWorker(
+            self.settings,
+            log=self.log,
+            keystore_path=self.paths.data_dir / "bluetooth" / "ancs-keys.json",
+            on_notification=self._on_ancs_notification,
+        )
 
         self.events = BoundedEventQueue(maxsize=512)
         self.recent_payloads = RecentPayloadFilter()
@@ -204,6 +215,8 @@ class BarkApp:
         self._prune_now()
         if self.settings.bluetooth_enabled:
             self.bluetooth.start()
+        if self.settings.ancs_enabled:
+            self.ancs.start()
 
         pending = self._pending_uri_action()
         if self._needs_setup():
@@ -547,6 +560,15 @@ class BarkApp:
         """Called on a receiver thread: enqueue only, never block."""
         self.events.put(("payload", (raw, role)))
 
+    def _on_ancs_notification(self, notification: AncsNotification) -> None:
+        """Called on the ANCS receiver thread: convert and enqueue only."""
+        try:
+            raw = notification.to_bark_payload()
+        except Exception:  # pragma: no cover - malformed iPhone attributes
+            self.log.exception("ancs: could not build a payload")
+            return
+        self.events.put(("payload", (raw, "ancs")))
+
     def _start_ingest(self) -> None:
         if self._ingest_thread is not None:
             return
@@ -569,15 +591,20 @@ class BarkApp:
                 self.log.exception("ingest failed")
 
     def _ingest_payload(self, raw: bytes, role: str = "bark") -> None:
-        if role == "supabase":
+        if role == "ancs":
+            # Keep ANCS history separate from Bark servers: the same numeric
+            # notification UID may exist on another transport.
+            host = "ancs"
+        elif role == "supabase":
             config = self._supabase_config()
             server = config[0] if config else self.settings.supabase_url
+            host = urlsplit(server).hostname or server
         else:
             link = self.db.get_link()
             server = (link.server_url if link and link.server_url else "") or (
                 self.settings.server_url
             )
-        host = urlsplit(server).hostname or server
+            host = urlsplit(server).hostname or server
         try:
             self.ingestor.handle_payload(raw, source_server=host)
         except Exception:  # pragma: no cover - never kill the ingest thread
@@ -762,7 +789,7 @@ class BarkApp:
                 raise BarkError(f"The Supabase project address is invalid: {exc}") from exc
             if not sb_url:
                 raise BarkError(
-                    "Enter the Supabase project address (sb://project.supabase.co)."
+                    "Enter the Supabase project URL (https://project.supabase.co)."
                 )
             sb_key = (
                 supabase_key if supabase_key is not None else self.settings.supabase_key
@@ -902,6 +929,11 @@ class BarkApp:
             self.settings.bluetooth_device_id,
             self.settings.bluetooth_device_name,
         )
+        previous_ancs = (
+            self.settings.ancs_enabled,
+            self.settings.ancs_adapter,
+            self.settings.ancs_adapter_name,
+        )
         previous_log_level = self.settings.log_level
         self.settings = settings
         if previous_log_level != settings.log_level:
@@ -920,6 +952,12 @@ class BarkApp:
             settings.bluetooth_device_name,
         ):
             self.bluetooth.configure(settings)
+        if previous_ancs != (
+            settings.ancs_enabled,
+            settings.ancs_adapter,
+            settings.ancs_adapter_name,
+        ):
+            self.ancs.configure(settings)
         if settings.silence_until and settings.silence_until > models.now_ms():
             if self.tray is not None:
                 self.tray.set_silenced(True)
@@ -1031,6 +1069,7 @@ class BarkApp:
     def remove_all_data(self) -> str:
         removed: list[str] = []
         self.stop_receiver()
+        self.ancs.stop(timeout=2.0)
         try:
             self.autostart.disable()
             removed.append("autostart entry")
@@ -1051,6 +1090,7 @@ class BarkApp:
             self.paths.settings_path,
             self.paths.routes_path,
             self.paths.instance_path,
+            self.paths.data_dir / "bluetooth" / "ancs-keys.json",
         ]
         for path in targets:
             try:
@@ -1220,6 +1260,22 @@ class BarkApp:
             starter("ms-settings:bluetooth")
         except OSError as exc:  # pragma: no cover - shell association missing
             self.log.warning("could not open Windows Bluetooth settings: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    # iPhone notifications (ANCS over a USB Bluetooth adapter)
+    # ------------------------------------------------------------------ #
+    def ancs_support(self) -> tuple[bool, str]:
+        return bluetooth_hci_support()
+
+    def ancs_adapters(self):
+        """USB Bluetooth controllers Bumble can use (may block briefly)."""
+        return list_usb_bluetooth_adapters()
+
+    def ancs_state(self) -> AncsState:
+        return self.ancs.state()
+
+    def ancs_restart(self) -> None:
+        self.ancs.reconnect_now()
 
     def open_routing(self) -> None:
         if self.shell is None:
@@ -1528,6 +1584,7 @@ class BarkApp:
         self.fetcher.shutdown(timeout=1.0)
         self.webhook_dispatcher.close(timeout=1.0)
         self.bluetooth.stop(timeout=2.0)
+        self.ancs.stop(timeout=4.0)
         if self._tts_preview is not None:
             self._tts_preview.shutdown(timeout=0.5)
             self._tts_preview = None

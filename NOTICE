@@ -49,6 +49,20 @@ cryptography — https://cryptography.io
   License: Apache-2.0 OR BSD-3-Clause
   Used for: loading the activation certificate/private key.
 
+bumble — https://github.com/google/bumble
+  License: Apache License 2.0
+  Used for: the ANCS (Apple Notification Center Service) receiver over USB
+  Bluetooth. Only imported when that optional setting is enabled.
+
+libusb1 (python binding) / libusb — https://github.com/vpelletier/python-libusb1
+  License: LGPL-2.1
+  Used by: Bumble's USB transport. Dynamically linked; ship the license text and
+  keep the library replaceable when bundling.
+
+libusb-package — https://github.com/vpelletier/libusb-package
+  License: LGPL-2.1 (bundles libusb)
+  Used by: locating the libusb shared library for the portable build.
+
 Python — https://www.python.org
   License: PSF License Agreement
   Bundled by PyInstaller in the portable build.

@@ -1205,6 +1205,7 @@ class BarkApp:
                     "can_send_message": self.can_send_message,
                     "on_send_message": self.send_message,
                     "on_copy_text": self.copy_text,
+                    "on_open_url": self.open_url,
                     "on_retry_image": self.retry_image,
                     "toast_notice": self._toast_notice,
                 },

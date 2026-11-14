@@ -21,7 +21,9 @@ from ..core.models import (
     ImageState,
     Notification,
 )
+from .links import iter_urls, open_target
 from .theme import (
+    ACCENT_COLOR,
     SEND_OFFLINE_BG,
     SEND_OFFLINE_FG,
     SEND_ONLINE_ACTIVE_BG,
@@ -35,6 +37,8 @@ THUMBNAIL_BOX = (320, 180)
 LIST_WIDTH = 442  # half of the fixed 900 px window, minus outer padding
 PREVIEW_CHARS = 34  # roughly what the 60 % content column shows at the fixed width
 COLUMN_RATIOS = (("title", 0.2), ("body", 0.6), ("time", 0.2))
+LINK_TAG = "link"
+BODY_CURSOR = "xterm"  # the Text default; restored when the pointer leaves a link
 
 
 def preview_text(text: str | None, limit: int = PREVIEW_CHARS) -> str:
@@ -173,6 +177,16 @@ class HistoryWindow:
 
         self.body_text = tk.Text(right, height=10, wrap="word", relief="flat", borderwidth=1)
         self.body_text.pack(fill="both", expand=True)
+        # Web addresses in a message open in the browser on click.  The click
+        # binding is on the widget, not the tag: a disabled Text widget ignores
+        # tag bindings, and hit-testing the index keeps the link a link even
+        # while the pane is read-only.
+        self.body_text.tag_configure(LINK_TAG, foreground=ACCENT_COLOR, underline=True)
+        self.body_text.bind("<Button-1>", self._on_body_click, add="+")
+        self.body_text.bind("<Motion>", self._on_body_motion, add="+")
+        self.body_text.bind(
+            "<Leave>", lambda _event: self.body_text.configure(cursor=BODY_CURSOR), add="+"
+        )
         self.body_text.configure(state="disabled")
 
         actions = ttk.Frame(right)
@@ -476,7 +490,9 @@ class HistoryWindow:
         )
         self.body_text.configure(state="normal")
         self.body_text.delete("1.0", "end")
-        self.body_text.insert("1.0", (notification.body or "")[:BODY_MAX_STORED_BYTES])
+        body = (notification.body or "")[:BODY_MAX_STORED_BYTES]
+        self.body_text.insert("1.0", body)
+        self._tag_links(body)
         self.body_text.configure(state="disabled")
         self._render_thumbnail(notification)
 
@@ -571,6 +587,54 @@ class HistoryWindow:
         # Update the detail pane immediately instead of waiting for the
         # queued <<TreeviewSelect>> event.
         self._on_select()
+
+    # -- links ------------------------------------------------------------- #
+    def _tag_links(self, body: str) -> None:
+        """Underline every web address so it reads as clickable."""
+        self.body_text.tag_remove(LINK_TAG, "1.0", "end")
+        for start, end, _url in iter_urls(body):
+            self.body_text.tag_add(LINK_TAG, f"1.0 + {start}c", f"1.0 + {end}c")
+
+    def _link_at(self, x: int, y: int) -> str | None:
+        """The address drawn under the pointer at (*x*, *y*), or None."""
+        try:
+            index = self.body_text.index(f"@{int(x)},{int(y)}")
+        except tk.TclError:  # pragma: no cover - pointer outside the pane
+            return None
+        if LINK_TAG not in self.body_text.tag_names(index):
+            return None
+        ranges = self.body_text.tag_ranges(LINK_TAG)
+        for start, end in zip(ranges[0::2], ranges[1::2], strict=False):
+            if self.body_text.compare(start, "<=", index) and self.body_text.compare(
+                index, "<", end
+            ):
+                return self.body_text.get(start, end)
+        return None
+
+    def _on_body_click(self, event) -> str | None:
+        url = self._link_at(event.x, event.y)
+        if url is None:
+            return None
+        self._open_url(url)
+        return "break"
+
+    def _on_body_motion(self, event) -> None:
+        cursor = "hand2" if self._link_at(event.x, event.y) else BODY_CURSOR
+        if self.body_text.cget("cursor") != cursor:
+            self.body_text.configure(cursor=cursor)
+
+    def _open_url(self, url: str) -> None:
+        """Hand a link to the browser through the controller."""
+        target = open_target(url)
+        if target is None:
+            return
+        callback = self.callbacks.get("on_open_url")
+        if callback is None:
+            return
+        try:
+            callback(target)
+        except Exception:  # pragma: no cover - callback isolation
+            logger.exception("on_open_url callback failed")
 
     def _copy(self) -> None:
         if self._selected is None:

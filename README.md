@@ -314,6 +314,12 @@ Closing the history window does **not** stop delivery — the app keeps running 
 the tray. The tray icon colour shows the connection state: blue = connected,
 amber = reconnecting, red = action required, moon = silenced.
 
+A message body is shown verbatim. Web addresses in it (`https://…`, `http://…`
+and a bare `www.…`) are underlined in the detail pane and open in the default
+browser on a single click; the hand cursor shows when the pointer is over one.
+A trailing sentence mark or Chinese punctuation is not part of the address, so
+`请看 https://example.com/a。（详情）` links exactly `https://example.com/a`.
+
 Start at login is opt-in (on Windows, Settings → *Start with Windows*). It writes
 a per-user `Run` entry; no admin prompt is involved, and it is visible in Task
 Manager → Startup. Other backends will expose the same option and map it to a

@@ -332,3 +332,119 @@ def test_routing_button_sits_next_to_settings_and_opens_the_dialog(hidden_root, 
     finally:
         window.destroy()
     assert opened == [True]
+
+
+# --------------------------------------------------------------------------- #
+# Links in the message body
+# --------------------------------------------------------------------------- #
+
+
+def _seed_body(db, body: str) -> int:
+    notification = Notification(
+        remote_id=f"link-{body[:8]}",
+        title="link",
+        body=body,
+        received_at=1_700_000_000_000,
+        source_server="https://example.test",
+    )
+    notification_id = db.insert_notification(notification)
+    assert notification_id is not None
+    return notification_id
+
+
+def _link_texts(window) -> list[str]:
+    ranges = window.body_text.tag_ranges("link")
+    return [
+        window.body_text.get(start, end)
+        for start, end in zip(ranges[0::2], ranges[1::2], strict=False)
+    ]
+
+
+def _click(window, index: str) -> None:
+    """Synthesise a left click on the character at *index* of the body pane."""
+    window.window.deiconify()
+    window.window.update()
+    box = window.body_text.bbox(index)
+    assert box, f"no geometry for {index}"
+    window.body_text.event_generate("<Button-1>", x=box[0] + 2, y=box[1] + 2)
+    window.window.update()
+
+
+def test_body_urls_are_marked_as_links(hidden_root, db):
+    window = _compose_window(hidden_root, db)
+    try:
+        _select(window, _seed_body(db, "ready: https://example.com/a?b=1 and www.example.org"))
+        assert _link_texts(window) == ["https://example.com/a?b=1", "www.example.org"]
+    finally:
+        window.destroy()
+
+
+def test_clicking_a_link_in_the_body_opens_it(hidden_root, db):
+    opened: list[str] = []
+    window = _compose_window(hidden_root, db, on_open_url=opened.append)
+    try:
+        _select(window, _seed_body(db, "see https://example.com/jobs/412 ok"))
+        _click(window, "1.6")
+        assert opened == ["https://example.com/jobs/412"]
+    finally:
+        window.destroy()
+
+
+def test_clicking_a_bare_www_link_adds_the_scheme(hidden_root, db):
+    opened: list[str] = []
+    window = _compose_window(hidden_root, db, on_open_url=opened.append)
+    try:
+        _select(window, _seed_body(db, "home www.example.com/start"))
+        _click(window, "1.7")
+        assert opened == ["https://www.example.com/start"]
+    finally:
+        window.destroy()
+
+
+def test_clicking_plain_text_opens_nothing(hidden_root, db):
+    opened: list[str] = []
+    window = _compose_window(hidden_root, db, on_open_url=opened.append)
+    try:
+        _select(window, _seed_body(db, "see https://example.com ok"))
+        _click(window, "1.1")
+        assert opened == []
+    finally:
+        window.destroy()
+
+
+def test_hovering_a_link_shows_the_hand_cursor(hidden_root, db):
+    window = _compose_window(hidden_root, db)
+    try:
+        _select(window, _seed_body(db, "see https://example.com ok"))
+        window.window.deiconify()
+        window.window.update()
+        link = window.body_text.bbox("1.6")
+        plain = window.body_text.bbox("1.1")
+        window.body_text.event_generate("<Motion>", x=link[0] + 2, y=link[1] + 2)
+        window.window.update()
+        assert window.body_text.cget("cursor") == "hand2"
+        window.body_text.event_generate("<Motion>", x=plain[0] + 2, y=plain[1] + 2)
+        window.window.update()
+        assert window.body_text.cget("cursor") == "xterm"
+    finally:
+        window.destroy()
+
+
+def test_links_work_for_an_old_message_outside_the_loaded_page(hidden_root, db, monkeypatch):
+    """Parsing happens at render time, so history pages need no re-indexing."""
+    monkeypatch.setattr("bark_pc.ui.history_window.PAGE_SIZE", 1)
+    oldest, middle, _newest = (
+        _seed_body(db, f"stored {index} ago: https://example.com/{index}")
+        for index in range(3)
+    )
+    window = _compose_window(hidden_root, db)
+    try:
+        window.window.update()  # let the queued <<TreeviewSelect>> render the pane
+        # Only the newest row is loaded; the oldest is pulled in by its id.
+        assert _link_texts(window) == ["https://example.com/2"]
+        _select(window, oldest)
+        assert _link_texts(window) == ["https://example.com/0"]
+        _select(window, middle)
+        assert _link_texts(window) == ["https://example.com/1"]
+    finally:
+        window.destroy()

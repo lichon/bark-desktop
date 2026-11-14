@@ -72,7 +72,24 @@ dongle.
   the iPhone connects, forwards notifications, returns to `ADVERTISING` after
   the link drops, accepts a reconnect without reopening the adapter, reports
   start failures in `ERROR`, restarts when the adapter changes, and stops when
-  the option is disabled.
+  the option is disabled. A restart only opens the second session after the
+  first one released the USB adapter: every teardown step (notification task,
+  ANCS client, iPhone disconnect, advertising, transport) is bounded, and a
+  teardown that wedges past the stop timeout lands in `ERROR` with “press
+  Restart again” instead of reopening the dongle while it is still held — that
+  second `open_transport` is what used to fail as “device busy” and leave the
+  receiver silent, so the iPhone's later connection attempt failed too.
+* **Bond identity** — the accessory advertises `F0:F1:F2:F3:F4:F5` (static
+  random) and the SMP key distribution reports *that* address as its identity
+  address (`identity_address_type=RANDOM`), never the controller's public
+  BD_ADDR: iOS keys the Settings entry and the LTK on the identity address, so a
+  mismatch makes every reconnect fail until the user chooses *Forget This
+  Device*. The local IRK is random and persisted in `bluetooth/ancs-irk.bin`
+  (Bumble's default is 16 zero bytes). After a restart the iPhone reconnects on
+  its own and encrypts with the stored LTK; the accessory waits for that
+  encryption and only sends an SMP Security Request when the bond is missing or
+  the iPhone never starts it — asking too early makes iOS fall back to a fresh
+  pairing.
 * **USB discovery** — Bluetooth-class devices and composite devices with a
   Bluetooth interface are found; drives and hubs are not; identical dongles get
   stable `serial`/`#N` selectors. Enumeration and the support probe never raise.
@@ -132,14 +149,19 @@ dongle.
 5. Lock the iPhone / walk out of range: the status returns to *Advertising*;
    bring it back (tap the accessory again) and it reconnects. Existing alerts
    must not be re-added to the history.
-6. Restart the app with the option saved: advertising resumes without the
+6. Restart the receiver while the iPhone is connected: the status returns to
+   *Advertising* and the iPhone reconnects on its own within a few seconds
+   (bonded, no tap in Settings, no re-pairing prompt). The same must hold after
+   a full app restart: if iOS asks to pair every time, the accessory is not
+   advertising its bond identity address.
+7. Restart the app with the option saved: advertising resumes without the
    adapter selection being lost. Unplug the dongle and restart: the status shows
    a driver/not-found error rather than crashing.
-7. Optional cross-check without the GUI: stop the receiver, then run
+8. Optional cross-check without the GUI: stop the receiver, then run
    `python -m bark_pc.tools.ancs_connect --mode advertise` (see the README). It
    must find the same dongle, advertise the same accessory and print incoming
    notifications; the bond it creates is reused by the app afterwards.
-8. Optional packet check, no dongle needed:
+9. Optional packet check, no dongle needed:
    `python -m bark_pc.tools.ancs_connect --dump-advertising`. The elements must
    be `0x01 Flags`, `0x15 128-bit service solicitation 7905f431-…-4b1e122d00d0`,
    `0x03 16-bit service UUIDs (complete) 0x1812`, then `0x19 Appearance
@@ -148,7 +170,7 @@ dongle.
    solicited* the iPhone never offers the service, and if HID is missing iOS may
    never list the accessory at all. `--no-hid` shows the ANCS-only packet for
    comparison (`0x00C0` appearance, 25 bytes).
-9. Optional appearance/security experiment: run the accessory through the CLI
+10. Optional appearance/security experiment: run the accessory through the CLI
    instead of the GUI, for example
    `python -m bark_pc.tools.ancs_connect --mode advertise --appearance 0x0007`
    or `… --mitm`. The tool prints the PDU it advertises, the passkey when MITM
@@ -169,10 +191,11 @@ Known limitations:
   always pairs with Just Works + bonding. The CLI can change both
   (`--appearance`, `--mitm`) for experiments; a display-less accessory cannot
   complete MITM without showing a passkey somewhere.
-* The PC is the BLE peripheral, so it cannot connect first: the iPhone has to
-  be the one tapping the accessory in Settings → Bluetooth. If iOS never lists
-  *Bark Desktop*, check that the HID service is advertised (see the packet check
-  above).
+* The iPhone has to tap *Bark Desktop* once in Settings → Bluetooth. After that
+  the bond drives every reconnect; the receiver never dials the iPhone itself.
+  Keeping Settings → Bluetooth open makes iOS advertise sooner. If iOS never
+  lists *Bark Desktop*, check that the HID service is advertised (see the packet
+  check above).
 * A WinUSB-bound dongle disappears from Windows' Bluetooth devices while the
   receiver is running; use a dedicated dongle for ANCS.
 * Pre-existing notifications are skipped on purpose, so history is not replayed

@@ -33,6 +33,14 @@ ANCS_ADVERTISED_NAME = "Bark Desktop"
 # so 0x00C0 is Watch/Generic Watch and 0x00C2 is Watch/Smartwatch.
 ANCS_APPEARANCE = 0x00C0
 RETRY_DELAY_S = 5.0
+# Tearing the session down means disconnecting the iPhone, stopping advertising
+# and releasing the USB adapter; each step in the backend is bounded, so this is
+# a ceiling for the whole sequence rather than a guess at a single command.
+STOP_TIMEOUT_S = 10.0
+STOP_BUSY_MESSAGE = (
+    "The USB Bluetooth adapter did not finish shutting down. Wait a moment and "
+    "press Restart again."
+)
 
 logger = logging.getLogger("bark_pc.ancs")
 
@@ -188,12 +196,11 @@ class AncsNotification:
 
     @property
     def display_title(self) -> str:
+        app = (self.app_name or "").strip()
         title = (self.title or "").strip()
-        if title:
-            return title
-        if (self.body or "").strip():
-            return self.app_name or self.category or "iPhone notification"
-        return self.app_name or self.category or "iPhone notification"
+        if app and title:
+            return f"{app} - {title}"
+        return title or app or self.category or "iPhone notification"
 
     @property
     def remote_id(self) -> str:
@@ -202,11 +209,13 @@ class AncsNotification:
         return f"ancs-{self.uid}-{suffix}"
 
     def to_bark_payload(self) -> bytes:
-        """Map ANCS attributes onto the Bark payload `Ingestor` already parses."""
+        """Map ANCS attributes onto the Bark payload `Ingestor` already parses.
+
+        The app name is folded into the title (`App - title`), so the payload
+        leaves the subtitle empty instead of repeating the app name there.
+        """
         title = self.display_title
         subtitle = ""
-        if self.app_name and self.app_name != title:
-            subtitle = self.app_name
         body = (self.body or "").strip()
         if body == title:
             body = ""
@@ -288,6 +297,11 @@ class AncsWorker:
         self._state = AncsState()
         self._state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        # Bumped by `start` and `stop`.  A thread may only touch the shared
+        # loop/backend/state when it still owns the current generation: a wedged
+        # teardown can outlive `stop`'s timeout and must not clobber the session
+        # that replaces it.
+        self._generation = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
         self._stop_requested = threading.Event()
@@ -313,11 +327,25 @@ class AncsWorker:
             return
         self._stop_requested.clear()
         self._loop_ready.clear()
+        self._generation += 1
         self._set_state(AncsStatus.STARTING, detail="Opening the USB Bluetooth adapter…")
-        self._thread = threading.Thread(target=self._thread_main, name="bark-ancs", daemon=True)
+        self._thread = threading.Thread(
+            target=self._thread_main,
+            args=(self._generation,),
+            name="bark-ancs",
+            daemon=True,
+        )
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = STOP_TIMEOUT_S) -> bool:
+        """Stop the receiver; False when the thread outlived *timeout*.
+
+        The receiver owns a USB adapter, so a restart may only reopen it once
+        the old thread has released it.  A wedged controller can leave the
+        teardown waiting on an HCI event that never arrives, hence the flag: a
+        caller that sees False must not start a second session on that adapter.
+        """
+        self._generation += 1  # the running thread may no longer touch our state
         self._stop_requested.set()
         self._loop_ready.set()
         loop = self._loop
@@ -327,15 +355,34 @@ class AncsWorker:
             except RuntimeError:  # pragma: no cover - loop already closed
                 pass
         thread, self._thread = self._thread, None
+        stopped = True
         if thread is not None:
             thread.join(timeout)
-            if thread.is_alive():  # pragma: no cover - daemon thread, abandoned
-                self._log.warning("the ANCS receiver thread did not stop within %.1fs", timeout)
+            if thread.is_alive():
+                stopped = False
+                # Keep it registered so `is_running` stays True and a later
+                # `start` cannot open the same adapter behind its back.
+                self._thread = thread
+                self._log.warning(
+                    "the ANCS receiver thread did not stop within %.1fs; "
+                    "the adapter is still held",
+                    timeout,
+                )
         self._loop = None
         self._set_state(AncsStatus.OFF, detail="")
+        return stopped
 
-    def restart(self) -> None:
-        self.stop()
+    def restart(self, timeout: float = STOP_TIMEOUT_S) -> None:
+        """Restart the receiver, never starting a second session on a busy adapter."""
+        if not self.stop(timeout):
+            self._set_state(
+                AncsStatus.ERROR,
+                adapter_name=self._settings.ancs_adapter_name,
+                error=STOP_BUSY_MESSAGE,
+                detail=STOP_BUSY_MESSAGE,
+            )
+            self._log.warning("ancs: %s", STOP_BUSY_MESSAGE)
+            return
         if self._settings.ancs_enabled:
             self.start()
 
@@ -359,23 +406,27 @@ class AncsWorker:
         self.restart()
 
     # -- thread plumbing --------------------------------------------------- #
-    def _thread_main(self) -> None:
+    def _thread_main(self, generation: int) -> None:
         try:
             asyncio.run(self._run())
         except asyncio.CancelledError:  # pragma: no cover - normal shutdown
             pass
         except Exception:  # pragma: no cover - unexpected Bumble/asyncio failure
             self._log.exception("the ANCS receiver crashed")
-            self._set_state(
-                AncsStatus.ERROR,
-                error="The iPhone notification receiver stopped unexpectedly.",
-            )
+            if generation == self._generation:
+                self._set_state(
+                    AncsStatus.ERROR,
+                    error="The iPhone notification receiver stopped unexpectedly.",
+                )
         finally:
-            self._loop = None
-            self._backend = None
             self._loop_ready.set()
-            if self._stop_requested.is_set():
-                self._set_state(AncsStatus.OFF, detail="")
+            if self._thread is threading.current_thread():
+                self._thread = None
+            if generation == self._generation:
+                self._loop = None
+                self._backend = None
+                if self._stop_requested.is_set():
+                    self._set_state(AncsStatus.OFF, detail="")
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -447,7 +498,9 @@ class AncsWorker:
     async def _peripheral_loop(self, backend: AncsBackend) -> bool:
         """Serve connections initiated by the iPhone until stop."""
         while not self._stop_requested.is_set():
-            peer = await self._await_or_stop(backend.wait_for_connection(self._stop_event), None)
+            peer = await self._await_or_stop(
+                backend.wait_for_connection(self._stop_event), None
+            )
             if peer is None:
                 return True
             self._set_state(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import types
 
 import pytest
@@ -29,9 +30,11 @@ class FakeConnection:
     """Only the bits of `bumble.device.Connection` the backend touches."""
 
     EVENT_PAIRING_FAILURE = "pairing_failure"
+    PEER = "AA:BB:CC:DD:EE:FF"
 
     def __init__(self, role, *, encrypted=False, refuse=False):
         self.role = role
+        self.peer_address = self.PEER
         self.is_encrypted = encrypted
         self.refuse = refuse
         self.requested = 0
@@ -123,6 +126,45 @@ def test_a_refusal_from_the_iphone_is_reported(backend):
     assert "forget" in message
 
 
+class HangingConnection(FakeConnection):
+    """A link whose disconnect never completes: no Disconnection Complete."""
+
+    async def disconnect(self, reason=0) -> None:
+        await asyncio.sleep(3600)
+
+
+class HangingTransport:
+    """A USB transport whose event thread never joins."""
+
+    async def close(self) -> None:
+        await asyncio.sleep(3600)
+
+
+def test_teardown_is_bounded_when_the_iphone_disconnect_never_completes(
+    backend, monkeypatch
+):
+    """A wedged disconnect must not keep the receiver thread (and USB) alive."""
+    monkeypatch.setattr(ancs_backend, "TEARDOWN_STEP_TIMEOUT_S", 0.05)
+    backend._connection = HangingConnection(HCI_STUB.Role.PERIPHERAL)
+
+    started = time.monotonic()
+    asyncio.run(backend._teardown_connection(disconnect=True))
+
+    assert time.monotonic() - started < 2.0
+    assert backend._connection is None
+
+
+def test_closing_the_transport_is_bounded(backend, monkeypatch):
+    monkeypatch.setattr(ancs_backend, "TEARDOWN_TRANSPORT_TIMEOUT_S", 0.05)
+    backend._transport = HangingTransport()
+
+    started = time.monotonic()
+    asyncio.run(backend._close_transport())
+
+    assert time.monotonic() - started < 2.0
+    assert backend._transport is None
+
+
 def test_the_failure_listener_is_removed(backend):
     connection = FakeConnection(HCI_STUB.Role.PERIPHERAL)
 
@@ -137,11 +179,71 @@ class FakeDevice:
     advertising_data = b""
     scan_response_data = b""
 
-    def __init__(self):
+    def __init__(self, keystore=None):
         self.services = []
+        self.keystore = keystore
 
     def add_service(self, service) -> None:
         self.services.append(service)
+
+
+class FakeKeystore:
+    """`bumble.keys.KeyStore` lookups, by peer address string."""
+
+    def __init__(self, entries=None):
+        self.entries = entries or {}
+
+    async def get(self, name):
+        return self.entries.get(name)
+
+
+def _bond(backend, connection, *, ltk=True) -> None:
+    backend._device = FakeDevice(
+        keystore=FakeKeystore(
+            {
+                str(connection.peer_address): types.SimpleNamespace(
+                    ltk=object() if ltk else None, ltk_peripheral=None
+                )
+            }
+        )
+    )
+
+
+def test_a_bonded_reconnect_waits_for_the_iphone_instead_of_asking_again(backend):
+    """A Security Request sent into the iPhone's own encryption breaks the bond."""
+    connection = FakeConnection(HCI_STUB.Role.PERIPHERAL)
+    _bond(backend, connection)
+
+    async def run():
+        asyncio.get_running_loop().call_later(
+            0.01, setattr, connection, "is_encrypted", True
+        )
+        await backend._wait_for_secure_link(connection)
+
+    asyncio.run(run())
+
+    assert connection.requested == 0
+    assert connection.is_encrypted is True
+
+
+def test_a_bond_the_iphone_ignores_falls_back_to_a_security_request(backend, monkeypatch):
+    monkeypatch.setattr(ancs_backend, "RECONNECT_ENCRYPTION_WAIT_S", 0.05)
+    connection = FakeConnection(HCI_STUB.Role.PERIPHERAL)
+    _bond(backend, connection)
+
+    asyncio.run(backend._wait_for_secure_link(connection))
+
+    assert connection.requested == 1
+    assert connection.is_encrypted is True
+
+
+def test_an_unbonded_iphone_is_asked_to_pair_right_away(backend):
+    connection = FakeConnection(HCI_STUB.Role.PERIPHERAL)
+    backend._device = FakeDevice(keystore=FakeKeystore())
+
+    asyncio.run(backend._wait_for_secure_link(connection))
+
+    assert connection.requested == 1
 
 
 class FakePairing:
@@ -154,8 +256,14 @@ class FakePairing:
         def __init__(self, io_capability=None):
             self.io_capability = io_capability
 
+    class AddressType:
+        PUBLIC = 0
+        RANDOM = 1
+
 
 class FakePairingConfig:
+    AddressType = FakePairing.AddressType
+
     def __init__(self, **options):
         self.options = options
 
@@ -169,6 +277,34 @@ def test_just_works_is_the_default_security(backend):
     assert backend.mitm is False
     assert backend.bonding is True
     assert delegate.io_capability == FakePairing.PairingDelegate.NO_OUTPUT_NO_INPUT
+
+
+def test_the_bonded_identity_is_the_advertised_static_address(backend):
+    """iOS remembers the SMP identity address; it must be the one we advertise."""
+    config = backend._pairing_config(FakePairing)
+
+    assert config.options["identity_address_type"] == FakePairing.AddressType.RANDOM
+    assert config.options["bonding"] is True
+    assert config.options["sc"] is True
+
+
+def test_the_local_irk_is_created_once_and_reused(tmp_path):
+    keystore = tmp_path / "bluetooth" / "ancs-keys.json"
+    backend = ancs_backend.BumbleAncsBackend(log=LOGGER, keystore_path=keystore)
+
+    first = backend._load_or_create_irk()
+    again = ancs_backend.BumbleAncsBackend(
+        log=LOGGER, keystore_path=keystore
+    )._load_or_create_irk()
+
+    assert len(first) == ancs_backend.IRK_SIZE
+    assert first != bytes(ancs_backend.IRK_SIZE)
+    assert again == first
+    assert (tmp_path / "bluetooth" / ancs_backend.IRK_FILE_NAME).read_bytes() == first
+
+    # Without a key store path the IRK is ephemeral but still usable.
+    ephemeral = ancs_backend.BumbleAncsBackend(log=LOGGER)._load_or_create_irk()
+    assert len(ephemeral) == ancs_backend.IRK_SIZE
 
 
 def test_mitm_switches_to_a_passkey_display():

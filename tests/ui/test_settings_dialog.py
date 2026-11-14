@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import ttk
 
 import pytest
 
@@ -410,5 +411,32 @@ def test_test_voice_button_sits_on_the_last_configuration_row(
             if child.grid_info()
         ]
         assert int(buttons[0].grid_info()["row"]) == max(rows)
+    finally:
+        dialog.close()
+
+
+def test_start_on_login_option_lives_in_the_maintenance_tab(hidden_root, settings_store):
+    dialog = SettingsDialog(
+        hidden_root, settings_store=settings_store, controller=FakeController()
+    )
+    try:
+        tabs = {
+            dialog.notebook.tab(tab, "text"): dialog.window.nametowidget(tab)
+            for tab in dialog.notebook.tabs()
+        }
+        startup = "Start on user login (no admin rights)"
+
+        def checkboxes(tab_name: str) -> list[str]:
+            return [
+                child.cget("text")
+                for child in tabs[tab_name].winfo_children()
+                if isinstance(child, ttk.Checkbutton)
+            ]
+
+        assert startup in checkboxes("Maintenance")
+        assert startup not in checkboxes("Notifications")
+
+        dialog.autostart_var.set(True)
+        assert dialog._candidate()["autostart_enabled"] is True
     finally:
         dialog.close()

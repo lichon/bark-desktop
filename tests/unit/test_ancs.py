@@ -40,6 +40,8 @@ class FakeAncsBackend:
         self.started = False
         self.closed = False
         self.disconnected = 0
+        self.connect_attempts: list[tuple[str, str, float]] = []
+        self.fail_connect: str | None = None
         self._pending: list[AncsPeerInfo] = []
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -57,6 +59,12 @@ class FakeAncsBackend:
                     return self._pending.pop(0)
             await asyncio.sleep(0.01)
         return None
+
+    async def connect(self, peer, *, timeout=45.0):
+        self._loop = asyncio.get_running_loop()
+        self.connect_attempts.append((peer.address, peer.name, timeout))
+        if self.fail_connect:
+            raise AncsError(self.fail_connect)
 
     async def subscribe(self, on_notification, on_disconnected):
         self._loop = asyncio.get_running_loop()
@@ -85,13 +93,14 @@ class FakeAncsBackend:
 
 
 class _BackendRegistry:
-    def __init__(self, fail_start: str | None = None):
+    def __init__(self, fail_start: str | None = None, backend_class=FakeAncsBackend):
         self.fail_start = fail_start
+        self.backend_class = backend_class
         self.instances: list[FakeAncsBackend] = []
         self.lock = threading.Lock()
 
     def __call__(self, log, keystore_path, adapter):
-        backend = FakeAncsBackend(log, keystore_path, adapter)
+        backend = self.backend_class(log, keystore_path, adapter)
         if self.fail_start:
             async def failing_start():
                 raise AncsError(self.fail_start)
@@ -116,11 +125,12 @@ def wait_for(predicate, timeout: float = 3.0) -> bool:
     return False
 
 
-def make_worker(settings: Settings, registry: _BackendRegistry, received=None):
+def make_worker(settings: Settings, registry: _BackendRegistry, received=None, **kwargs):
     return AncsWorker(
         settings,
         backend_factory=registry,
         on_notification=(received.append if received is not None else None),
+        **kwargs,
     )
 
 
@@ -229,8 +239,9 @@ def test_notification_payload_goes_through_the_normal_ingest_path(db):
 
     assert result.outcome == ParseOutcome.MESSAGE
     stored = db.list_notifications()[0]
-    assert stored.title == "Ada"
-    assert stored.subtitle == "Messages"
+    assert stored.title == "Messages - Ada"
+    assert stored.subtitle is None
+    assert stored.display_title == "Messages - Ada"
     assert stored.body == "Dinner at 8?"
     assert stored.group_name == "Messages"
     assert stored.remote_id == "ancs-42-1700000000000"
@@ -246,6 +257,18 @@ def test_payload_falls_back_to_the_app_name_when_attributes_are_empty():
     assert notification.display_title == "Calendar"
     payload = notification.to_bark_payload().decode("utf-8")
     assert "Calendar" in payload
+
+
+def test_display_title_prefixes_the_app_name_only_when_both_are_known():
+    assert (
+        AncsNotification(uid=1, app_name="Messages", title="Ada").display_title
+        == "Messages - Ada"
+    )
+    assert AncsNotification(uid=1, title="Ada").display_title == "Ada"
+    assert (
+        AncsNotification(uid=1, app_name="Messages", title="  ").display_title
+        == "Messages"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -372,3 +395,42 @@ def test_disabling_the_setting_stops_the_receiver():
     worker.configure(Settings(ancs_enabled=False))
     assert worker.state().status is AncsStatus.OFF
     assert worker.is_running is False
+
+
+class _StuckCloseBackend(FakeAncsBackend):
+    """A backend whose teardown wedges, like a controller that never answers."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.release = threading.Event()
+
+    async def close(self):
+        await asyncio.get_running_loop().run_in_executor(None, self.release.wait)
+        await super().close()
+
+
+def test_restart_refuses_to_open_a_second_session_on_a_held_adapter():
+    """A wedged teardown must not be followed by a second `open_transport`.
+
+    Reopening the USB adapter while the old session still holds it fails with
+    “device busy”, leaves the receiver in ERROR and — the user-visible symptom —
+    nothing is advertising, so tapping the accessory on the iPhone fails.
+    """
+    settings = Settings(ancs_enabled=True, ancs_adapter="usb:0A12:0001")
+    registry = _BackendRegistry(backend_class=_StuckCloseBackend)
+    worker = make_worker(settings, registry)
+    try:
+        worker.start()
+        assert wait_for(lambda: worker.state().status is AncsStatus.ADVERTISING)
+
+        worker.restart(timeout=0.2)
+        assert worker.state().status is AncsStatus.ERROR
+        assert "shutting down" in worker.state().error
+        # The old session is still registered, so `start` cannot race it.
+        assert worker.is_running is True
+        assert len(registry.instances) == 1
+    finally:
+        registry.latest.release.set()
+        assert worker.stop() is True
+    assert worker.is_running is False
+    assert worker.state().status is AncsStatus.OFF

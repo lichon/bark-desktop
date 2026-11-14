@@ -1,9 +1,8 @@
 """Bumble implementation of the ANCS receiver.
 
-The app always uses one connection direction:
-
-* **peripheral** — advertise an ANCS service solicitation named “Bark Desktop”
-  so the iPhone can connect from its Settings → Bluetooth screen.
+The app always uses one connection direction: **peripheral**.  It advertises an
+ANCS service solicitation named “Bark Desktop” so the iPhone connects from its
+Settings → Bluetooth screen, and it never dials the iPhone itself.
 
 The diagnostic CLI (`bark_pc.tools.ancs_connect`) also drives the opposite role:
 it can scan for nearby Apple devices and connect to one of them.
@@ -11,7 +10,7 @@ it can scan for nearby Apple devices and connect to one of them.
 Common flow:
 
 1. open the selected USB Bluetooth HCI adapter through libusb,
-2. obtain a connection (advertise/wait, or scan/connect from the CLI),
+2. obtain a connection (advertise/wait in the app; scan/connect from the CLI),
 3. pair/bond (the iPhone asks for it; the keys are cached in the data folder),
 4. discover the ANCS service and subscribe to Notification Source + Data Source,
 5. request the title/subtitle/message/app attributes for every new notification.
@@ -24,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Callable
 from pathlib import Path
 
@@ -53,6 +53,28 @@ CONNECT_TIMEOUT_S = 25.0
 ANCS_DISCOVERY_TIMEOUT_S = 30.0
 ATTRIBUTE_TIMEOUT_S = 20.0
 APP_NAME_TIMEOUT_S = 10.0
+
+# Teardown must always finish: the receiver thread owns the USB adapter, and a
+# restart may only reopen it once the old session has let go.  A wedged
+# controller can leave a disconnect or a GATT teardown waiting for an HCI event
+# that never arrives, so every step here is bounded instead of trusted.
+TEARDOWN_STEP_TIMEOUT_S = 2.0
+TEARDOWN_TRANSPORT_TIMEOUT_S = 3.0
+
+# The LE identity the accessory advertises and bonds with.  A static random
+# address is stable across restarts, which is what lets iOS reuse the bond, and
+# it must be *the same address* that is distributed as the SMP identity address:
+# iOS keys the Settings entry (and the LTK) on the identity address from the
+# pairing, so a mismatch makes every reconnect fail until the user picks
+# “Forget This Device” and pairs again.
+STATIC_ADDRESS = "F0:F1:F2:F3:F4:F5"
+# How long a bonded iPhone gets to start encryption on its own before the
+# accessory falls back to an SMP Security Request.
+RECONNECT_ENCRYPTION_WAIT_S = 3.0
+# Local IRK, persisted next to the pairing keys.  Bumble's default is 16 zero
+# bytes, which is not a usable resolving key to advertise to a bonded iPhone.
+IRK_FILE_NAME = "ancs-irk.bin"
+IRK_SIZE = 16
 
 # Title/subtitle/message are length-limited when requested.  These are Apple's
 # recommended maxima (ANCS spec); larger values are rejected by some iOS builds.
@@ -150,7 +172,8 @@ class BumbleAncsBackend:
         config = device_module.DeviceConfiguration(
             name=ANCS_ADVERTISED_NAME,
             # A fixed static address keeps the iPhone's bond valid across runs.
-            address=hci.Address("F0:F1:F2:F3:F4:F5"),
+            address=hci.Address(STATIC_ADDRESS),
+            irk=self._load_or_create_irk(),
         )
         try:
             self._device = device_module.Device.from_config_with_hci(
@@ -174,11 +197,8 @@ class BumbleAncsBackend:
             # ANCS only needs an encrypted, bonded link.  Just Works is the one
             # pairing method an accessory without a display can complete;
             # `--mitm` switches to passkey entry and shows the number instead.
-            self._device.pairing_config_factory = lambda _connection: pairing.PairingConfig(
-                sc=True,
-                mitm=self.mitm,
-                bonding=self.bonding,
-                delegate=self._pairing_delegate(pairing),
+            self._device.pairing_config_factory = lambda _connection: self._pairing_config(
+                pairing
             )
             await self._device.power_on()
             if self.hid:
@@ -188,7 +208,43 @@ class BumbleAncsBackend:
             raise AncsError(f"Could not start the Bluetooth controller: {exc}") from exc
 
         self._configure_advertising(core)
-        self.log.info("ancs: opened %s", adapter)
+        self.log.info(
+            "ancs: opened %s, LE identity %s (static random)", adapter, STATIC_ADDRESS
+        )
+
+    def _load_or_create_irk(self) -> bytes:
+        """A stable local IRK for the bonded identity, created on first run.
+
+        Bumble's default is 16 zero bytes: a bonded iPhone would store that as
+        our resolving key.  Never matching is harmless today (we advertise a
+        static address), but a real, persisted key is what the profile expects
+        and it keeps an eventual RPA switch from silently breaking the bond.
+        """
+        if self.keystore_path is None:
+            return secrets.token_bytes(IRK_SIZE)
+        path = self.keystore_path.with_name(IRK_FILE_NAME)
+        try:
+            data = path.read_bytes()
+            if len(data) == IRK_SIZE:
+                return data
+            self.log.warning("ancs: %s is not %d bytes; regenerating it", path, IRK_SIZE)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            self.log.warning("ancs: could not read %s", path, exc_info=True)
+            return secrets.token_bytes(IRK_SIZE)
+        irk = secrets.token_bytes(IRK_SIZE)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(irk)
+            self.log.info("ancs: local IRK created in %s", path)
+        except OSError:  # pragma: no cover - read-only data folder
+            self.log.warning(
+                "ancs: could not save the local IRK; the iPhone may ask to pair "
+                "again after a restart",
+                exc_info=True,
+            )
+        return irk
 
     def _add_hid_service(self) -> None:
         """Publish the HOGP keyboard so iOS has a profile it always lists."""
@@ -201,6 +257,23 @@ class BumbleAncsBackend:
         self._device.add_service(keyboard)
         self.hid_keyboard = keyboard
         self.log.info("ancs: HID keyboard service 0x%04X published", HID_SERVICE_UUID_16)
+
+    def _pairing_config(self, pairing):
+        """Just Works + bonding, with the identity iOS will remember.
+
+        `identity_address_type=RANDOM` is not cosmetic: without it Bumble
+        distributes the *controller's* public BD_ADDR as the accessory's SMP
+        identity address while advertising `STATIC_ADDRESS`.  iOS then bonds the
+        public address, never sees the accessory at the static one again, and
+        the Settings entry only works after “Forget This Device”.
+        """
+        return pairing.PairingConfig(
+            sc=True,
+            mitm=self.mitm,
+            bonding=self.bonding,
+            identity_address_type=pairing.PairingConfig.AddressType.RANDOM,
+            delegate=self._pairing_delegate(pairing),
+        )
 
     def _pairing_delegate(self, pairing):
         """Just Works by default; passkey entry when MITM is requested."""
@@ -507,10 +580,49 @@ class BumbleAncsBackend:
             return None
         return asyncio.ensure_future(connection.pair())
 
+    async def _has_pairing_keys(self, connection) -> bool:
+        """True when the key store already holds an LTK for this peer."""
+        keystore = getattr(self._device, "keystore", None)
+        if keystore is None:
+            return False
+        try:
+            found = await keystore.get(str(connection.peer_address))
+        except Exception:  # pragma: no cover - unreadable key store
+            self.log.debug("ancs: key store lookup failed", exc_info=True)
+            return False
+        if found is None:
+            return False
+        return found.ltk is not None or found.ltk_peripheral is not None
+
+    async def _wait_for_encryption(self, connection, timeout: float) -> bool:
+        """Wait up to *timeout* for the iPhone to encrypt with the stored LTK."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not connection.is_encrypted:
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
     async def _wait_for_secure_link(self, connection) -> None:
         """Wait for bonding, whether the iPhone or this accessory starts it."""
         if connection.is_encrypted:
             return
+        _core, _device, hci, _keys, _pairing, _ancs, _open = _require_bumble()
+        if connection.role == hci.Role.PERIPHERAL and await self._has_pairing_keys(
+            connection
+        ):
+            # A reconnect: the iPhone starts encryption with the LTK from the
+            # bond by itself.  Sending a Security Request into that procedure
+            # makes iOS fall back to a fresh pairing, which leaves the Settings
+            # entry unusable until it is forgotten, so give the encryption a
+            # moment to complete and only ask for pairing if it never starts.
+            if await self._wait_for_encryption(connection, RECONNECT_ENCRYPTION_WAIT_S):
+                self.log.info("ancs: reconnected with the stored bond")
+                return
+            self.log.info(
+                "ancs: the iPhone did not use the stored bond; requesting pairing"
+            )
         loop = asyncio.get_running_loop()
         pair_task = await self._start_pairing(connection)
 
@@ -561,27 +673,56 @@ class BumbleAncsBackend:
     async def close(self) -> None:
         await self._teardown_connection(disconnect=True)
         if self._device is not None:
-            try:
-                await self._device.stop_advertising()
-            except Exception:  # pragma: no cover - already stopped
-                pass
+            await self._bounded(
+                self._device.stop_advertising(),
+                TEARDOWN_STEP_TIMEOUT_S,
+                description="stopping advertising",
+            )
         self._device = None
         await self._close_transport()
+
+    async def _bounded(self, awaitable, timeout: float, *, description: str):
+        """Await *awaitable*, but never let teardown block the restart forever.
+
+        Bumble's `Connection.disconnect` waits for the controller's Disconnection
+        Complete event, and a wedged or half-removed adapter may never send it.
+        The receiver thread must still exit, otherwise `AncsWorker.restart` opens
+        the same USB adapter while the old session holds it and every iPhone
+        connection attempt fails with nothing advertising.
+        """
+        try:
+            return await asyncio.wait_for(awaitable, timeout)
+        except asyncio.TimeoutError:
+            self.log.warning(
+                "ancs: %s timed out after %.1fs; continuing teardown",
+                description,
+                timeout,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - link or controller already gone
+            self.log.debug("ancs: %s failed; continuing teardown", description, exc_info=True)
+        return None
 
     async def _close_transport(self) -> None:
         transport, self._transport = self._transport, None
         if transport is None:
             return
-        try:
-            await transport.close()
-        except Exception:  # pragma: no cover - libusb teardown
-            self.log.debug("ancs: closing the USB transport failed", exc_info=True)
+        await self._bounded(
+            transport.close(),
+            TEARDOWN_TRANSPORT_TIMEOUT_S,
+            description="closing the USB transport",
+        )
 
     async def _teardown_connection(self, *, disconnect: bool) -> None:
         task, self._process_task = self._process_task, None
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await self._bounded(
+                asyncio.gather(task, return_exceptions=True),
+                TEARDOWN_STEP_TIMEOUT_S,
+                description="cancelling the notification task",
+            )
         self._queue = None
 
         connection, self._connection = self._connection, None
@@ -593,15 +734,17 @@ class BumbleAncsBackend:
             except Exception:  # pragma: no cover - already removed
                 pass
         if client is not None:
-            try:
-                await client.stop()
-            except Exception:  # pragma: no cover - link already gone
-                self.log.debug("ancs: stopping the ANCS client failed", exc_info=True)
+            await self._bounded(
+                client.stop(),
+                TEARDOWN_STEP_TIMEOUT_S,
+                description="stopping the ANCS client",
+            )
         if connection is not None and disconnect:
-            try:
-                await connection.disconnect()
-            except Exception:  # pragma: no cover - already disconnected
-                self.log.debug("ancs: disconnecting the iPhone failed", exc_info=True)
+            await self._bounded(
+                connection.disconnect(),
+                TEARDOWN_STEP_TIMEOUT_S,
+                description="disconnecting the iPhone",
+            )
 
     # -- notifications ----------------------------------------------------- #
     def _enqueue_notification(self, notification) -> None:

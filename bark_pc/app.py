@@ -1091,6 +1091,10 @@ class BarkApp:
             self.paths.routes_path,
             self.paths.instance_path,
             self.paths.data_dir / "bluetooth" / "ancs-keys.json",
+            # Legacy: older builds remembered the last iPhone here.  The
+            # receiver no longer dials it, but "Remove all data" must not leave
+            # a paired identity behind.
+            self.paths.data_dir / "bluetooth" / "ancs-device.json",
         ]
         for path in targets:
             try:

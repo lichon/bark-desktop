@@ -1,4 +1,4 @@
-"""Settings dialog: server, retention, images, toasts, silence, autostart, wipe."""
+"""Settings dialog: server, retention, images, toasts, silence, startup, wipe."""
 
 from __future__ import annotations
 
@@ -399,20 +399,16 @@ class SettingsDialog:
             state="readonly",
             width=20,
         ).grid(row=8, column=1, sticky="w", pady=(2, 0))
-        self.autostart_var = tk.BooleanVar()
-        ttk.Checkbutton(
-            tab, text="Start with system (no admin rights)", variable=self.autostart_var
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
-        ttk.Separator(tab).grid(row=10, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=9, column=0, columnspan=2, sticky="ew", pady=6)
 
         ttk.Label(tab, text="Text-to-speech", style="Subtitle.TLabel").grid(
-            row=11, column=0, columnspan=2, sticky="w"
+            row=10, column=0, columnspan=2, sticky="w"
         )
         self.tts_var = tk.BooleanVar()
         ttk.Checkbutton(
             tab, text="Speak notifications aloud", variable=self.tts_var
-        ).grid(row=12, column=0, sticky="w")
+        ).grid(row=11, column=0, sticky="w")
         self.tts_provider_var = tk.StringVar()
         ttk.Combobox(
             tab,
@@ -420,13 +416,13 @@ class SettingsDialog:
             values=[PROVIDER_LABELS[name] for name in TTS_PROVIDERS],
             state="readonly",
             width=22,
-        ).grid(row=12, column=1, sticky="w")
+        ).grid(row=11, column=1, sticky="w")
         self.tts_body_var = tk.BooleanVar()
         ttk.Checkbutton(
             tab, text="Read the message body too", variable=self.tts_body_var
-        ).grid(row=13, column=0, sticky="w")
+        ).grid(row=12, column=0, sticky="w")
         voice = ttk.Frame(tab)
-        voice.grid(row=13, column=1, sticky="w")
+        voice.grid(row=12, column=1, sticky="w")
         self.tts_rate_var = tk.StringVar()
         ttk.Spinbox(voice, from_=-10, to=10, textvariable=self.tts_rate_var, width=4).pack(
             side="left"
@@ -443,9 +439,9 @@ class SettingsDialog:
             tab,
             text="Only read aloud while the screen is unlocked",
             variable=self.tts_unlocked_var,
-        ).grid(row=14, column=0, columnspan=2, sticky="w")
+        ).grid(row=13, column=0, columnspan=2, sticky="w")
         ttk.Button(tab, text="Test voice", command=self._test_voice).grid(
-            row=15, column=0, sticky="w", pady=(6, 0)
+            row=14, column=0, sticky="w", pady=(6, 0)
         )
 
         tab.columnconfigure(1, weight=1)
@@ -479,10 +475,28 @@ class SettingsDialog:
 
         ttk.Separator(tab).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 6))
 
-        ttk.Label(tab, text="Logging", style="Subtitle.TLabel").grid(
+        ttk.Label(tab, text="Startup", style="Subtitle.TLabel").grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
-        ttk.Label(tab, text="Log level").grid(row=5, column=0, sticky="w")
+        self.autostart_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            tab,
+            text="Start on user login (no admin rights)",
+            variable=self.autostart_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            tab,
+            text="Adds a per-user entry to the Windows Run key for the current program path.",
+            style="Muted.TLabel",
+            justify="left",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        ttk.Separator(tab).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+
+        ttk.Label(tab, text="Logging", style="Subtitle.TLabel").grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        ttk.Label(tab, text="Log level").grid(row=9, column=0, sticky="w")
         self.log_level_var = tk.StringVar(value="info")
         ttk.Combobox(
             tab,
@@ -490,13 +504,13 @@ class SettingsDialog:
             values=list(LOG_LEVELS),
             state="readonly",
             width=12,
-        ).grid(row=5, column=1, sticky="w")
+        ).grid(row=9, column=1, sticky="w")
         ttk.Label(
             tab,
             text="Debug also records every outbound HTTP request and response.",
             style="Muted.TLabel",
             justify="left",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(2, 0))
         tab.columnconfigure(1, weight=1)
 
     # -- values ------------------------------------------------------------ #

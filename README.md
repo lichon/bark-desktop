@@ -427,9 +427,9 @@ Steps:
 3. The status line changes to **Receiving notifications from …**. New alerts are
    stored with the source `ancs`; removing one on the iPhone leaves the history
    row alone.
-4. The iPhone's LE address rotates for privacy. After the first bond the cached
-   IRK resolves it automatically; **Restart receiver** re-runs advertising when
-   the iPhone has forgotten the PC.
+4. The iPhone connects on its own from then on: it is bonded, the receiver
+   keeps advertising, and the iPhone reconnects when it needs the accessory.
+   **Restart receiver** re-runs advertising if the link is ever lost.
 
 The accessory also publishes **HID over GATT** (service
 `0x1812`) and advertises it, so iOS sees a keyboard it knows how to list. ANCS
@@ -489,20 +489,32 @@ visible from the probe:
    + bonding, which is all a display-less accessory can complete; `--mitm` asks
    for passkey entry instead, and the negotiated `encrypted`/`authenticated`/
    `key` values are printed after subscribing.
+5. **Identity address.** The accessory advertises a fixed static random address
+   (`F0:F1:F2:F3:F4:F5`) and distributes *that same address* as its SMP identity
+   address (`identity_address_type=RANDOM`), with a local IRK persisted in
+   `bluetooth/ancs-irk.bin`. iOS keys the Settings entry and the LTK on the
+   identity address the pairing reported, so this is what lets a bonded iPhone
+   reconnect after the receiver restarts; a mismatch leaves the entry only
+   usable after *Forget This Device*.
 
 Notes and caveats:
 
-* Scanning/connecting is the same direction a smartwatch uses: the iPhone is the
-  ANCS server (GATT server) and this PC is the ANCS client (BLE central). iOS
-  must be advertising for the first connection; keeping Settings → Bluetooth
-  open is the most reliable way to make it do so.
+* The PC is the BLE peripheral: it advertises the ANCS solicitation and the
+  iPhone connects. On that same link the PC is the ANCS client (GATT client) and
+  the iPhone the ANCS server, which is the direction a smartwatch uses. iOS
+  initiates afterwards, so the accessory never has to scan or dial.
 * Only Notification Source and Data Source are consumed. Positive/negative
   actions (accepting a call, replying) are not performed.
 * Notifications that already existed when the connection was established are
   ignored, so reconnecting does not duplicate history.
 * Pairing keys are cached in `<data>\bluetooth\ancs-keys.json`, so the iPhone
-  normally asks only once. Deleting that file (or using *Remove all data*) makes
-  it ask again.
+  normally asks only once. Deleting that file (or using *Remove all data*)
+  makes it ask again.
+* Upgrading from a build that predates the identity-address fix needs one
+  **Forget This Device** on the iPhone: those bonds were recorded against the
+  dongle's public BD_ADDR instead of `F0:F1:F2:F3:F4:F5`, so iOS could never
+  find the accessory again. After that single re-pair, reconnects reuse the
+  bond.
 * The adapter is opened through libusb, so Windows does not show it as a
   Bluetooth radio while the receiver is running. Stop the option (or the app)
   before using that dongle for anything else.

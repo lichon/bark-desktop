@@ -343,6 +343,8 @@ it on in *Settings → Text-to-speech → Speak notifications aloud*, or toggle
   `TtsProvider` interface.
 * **Rate** (`-10…10`) and **volume** (`0…100`) are handed straight to the voice.
   *Test voice* speaks a sample line with the values currently in the dialog.
+* **Only the message body is spoken.** The title and subtitle are ignored, so a
+  notification that carries a title but no body stays silent.
 * **Only the newest message is spoken.** A new notification interrupts the
   current sentence instead of queueing behind it, so a burst never replays as a
   backlog.

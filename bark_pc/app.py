@@ -670,7 +670,6 @@ class BarkApp:
             return
         text = speech_text(
             notification,
-            include_body=self.settings.tts_include_body,
             hide_preview=self.settings.hide_preview_text,
             max_chars=self.settings.tts_max_chars,
         )

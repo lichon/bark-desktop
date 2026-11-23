@@ -417,12 +417,8 @@ class SettingsDialog:
             state="readonly",
             width=22,
         ).grid(row=11, column=1, sticky="w")
-        self.tts_body_var = tk.BooleanVar()
-        ttk.Checkbutton(
-            tab, text="Read the message body too", variable=self.tts_body_var
-        ).grid(row=12, column=0, sticky="w")
         voice = ttk.Frame(tab)
-        voice.grid(row=12, column=1, sticky="w")
+        voice.grid(row=12, column=0, columnspan=2, sticky="w")
         self.tts_rate_var = tk.StringVar()
         ttk.Spinbox(voice, from_=-10, to=10, textvariable=self.tts_rate_var, width=4).pack(
             side="left"
@@ -549,7 +545,6 @@ class SettingsDialog:
         )
         self.tts_rate_var.set(str(settings.tts_rate))
         self.tts_volume_var.set(str(settings.tts_volume))
-        self.tts_body_var.set(bool(settings.tts_include_body))
         self.tts_unlocked_var.set(bool(settings.tts_only_when_unlocked))
         self.silence_var.set("Off")
         if settings.silence_until and settings.silence_until > now_ms():
@@ -631,7 +626,6 @@ class SettingsDialog:
             "tts_provider": PROVIDER_LABEL_TO_NAME.get(
                 self.tts_provider_var.get(), DEFAULT_TTS_PROVIDER
             ),
-            "tts_include_body": bool(self.tts_body_var.get()),
             "tts_only_when_unlocked": bool(self.tts_unlocked_var.get()),
             "tts_rate": int(self.tts_rate_var.get()),
             "tts_volume": int(self.tts_volume_var.get()),

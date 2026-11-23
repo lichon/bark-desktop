@@ -135,7 +135,6 @@ Content store for notification images, addressed by URL hash.
 | `hide_preview_text` | `false` | bool (renders "New notification" instead of title/body) |
 | `tts_enabled` | `false` | bool; read new notifications aloud |
 | `tts_provider` | `windows` | `windows` (SAPI 5, no extra dependency) \| `none` |
-| `tts_include_body` | `true` | bool; title only when false |
 | `tts_rate` | `0` | -10–10 (SAPI rate) |
 | `tts_volume` | `100` | 0–100 |
 | `tts_max_chars` | `300` | 40–1 000; spoken text is clipped on a word boundary |

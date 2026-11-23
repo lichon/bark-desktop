@@ -43,22 +43,21 @@ def wait_for(predicate, timeout: float = 3.0) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-def test_speech_text_joins_title_and_body():
+def test_speech_text_reads_the_body_only():
     notification = Notification(title="Deploy done", body="build 412 is live")
 
-    assert speech_text(notification) == "Deploy done. build 412 is live"
+    assert speech_text(notification) == "build 412 is live"
 
 
-def test_speech_text_skips_the_body_when_asked():
-    notification = Notification(title="Deploy done", body="build 412 is live")
+def test_speech_text_ignores_the_title_and_subtitle():
+    notification = Notification(title="CI", subtitle="nightly", body="build failed")
 
-    assert speech_text(notification, include_body=False) == "Deploy done"
+    assert speech_text(notification) == "build failed"
 
 
-def test_speech_text_uses_the_title_or_subtitle_either_way():
-    assert speech_text(Notification(subtitle="CI")) == "CI"
-    assert speech_text(Notification(title="CI", subtitle="nightly")) == "CI — nightly"
-    assert speech_text(Notification(body="only a body")) == "only a body"
+def test_speech_text_is_silent_for_a_title_without_a_body():
+    assert speech_text(Notification(title="CI")) == ""
+    assert speech_text(Notification(title="CI", subtitle="nightly")) == ""
 
 
 def test_hidden_preview_never_reads_the_content_aloud():
@@ -76,7 +75,7 @@ def test_speech_text_flattens_markdown_and_drops_urls():
 
     spoken = speech_text(notification)
 
-    assert spoken == "Release. see the notes or"
+    assert spoken == "see the notes or"
 
 
 def test_speech_text_is_clipped_on_a_word_boundary():
@@ -92,6 +91,7 @@ def test_speech_text_is_clipped_on_a_word_boundary():
 def test_speech_text_is_empty_when_there_is_nothing_to_say():
     assert speech_text(Notification()) == ""
     assert speech_text(Notification(title="   ", body="\n")) == ""
+    assert speech_text(Notification(title="only a title")) == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -104,7 +104,6 @@ def test_tts_defaults_use_the_windows_provider_and_stay_off():
 
     assert settings.tts_enabled is False
     assert settings.tts_provider == DEFAULT_TTS_PROVIDER == "windows"
-    assert settings.tts_include_body is True
     assert settings.tts_only_when_unlocked is True
     assert settings.tts_rate == 0
     assert settings.tts_volume == 100
@@ -115,7 +114,6 @@ def test_tts_settings_survive_a_save_and_load_round_trip(settings_store):
     settings = Settings(
         tts_enabled=True,
         tts_provider="none",
-        tts_include_body=False,
         tts_only_when_unlocked=False,
         tts_rate=-4,
         tts_volume=40,
@@ -125,7 +123,7 @@ def test_tts_settings_survive_a_save_and_load_round_trip(settings_store):
     loaded = settings_store.load()
 
     assert (loaded.tts_enabled, loaded.tts_provider) == (True, "none")
-    assert (loaded.tts_include_body, loaded.tts_rate, loaded.tts_volume) == (False, -4, 40)
+    assert (loaded.tts_rate, loaded.tts_volume) == (-4, 40)
     assert loaded.tts_only_when_unlocked is False
 
 

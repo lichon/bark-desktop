@@ -22,19 +22,21 @@ _TRAILING_PUNCTUATION = " \t.,;:!?，。；：！？…"
 def speech_text(
     notification,
     *,
-    include_body: bool = True,
     hide_preview: bool = False,
     max_chars: int = DEFAULT_TTS_MAX_CHARS,
 ) -> str:
-    """The line to speak for *notification*, or "" when there is nothing useful."""
+    """The body of *notification* as one spoken line, or "" when it has none.
+
+    Only the body is read: the title and subtitle already appear in the toast,
+    and saying them first just delays the message.  A notification that carries
+    a title but no body is therefore silent.
+    """
     if hide_preview:
         return HIDDEN_PREVIEW_SPEECH
-    title = _plain(getattr(notification, "display_title", "") or "").rstrip(_TRAILING_PUNCTUATION)
-    body = _plain(getattr(notification, "body", "") or "") if include_body else ""
-    parts = [part for part in (title, body) if part]
-    if not parts:
+    body = _plain(getattr(notification, "body", "") or "")
+    if not body:
         return ""
-    return _clip(". ".join(parts), max_chars)
+    return _clip(body, max_chars)
 
 
 def _plain(text: str) -> str:

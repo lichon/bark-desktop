@@ -9,10 +9,10 @@ work.
 
 `python -m pytest tests/unit/test_tts.py` — 27 tests, no audio and no network:
 
-* **Spoken text** — title+body joined, body optional, subtitle-only pushes,
-  `Hide preview text` collapses to "New notification", markdown images/links and
-  bare URLs removed, whitespace flattened, clipping on a word boundary,
-  empty notifications stay silent.
+* **Spoken text** — the body only (title and subtitle ignored), a title without
+  a body stays silent, `Hide preview text` collapses to "New notification",
+  markdown images/links and bare URLs removed, whitespace flattened, clipping on
+  a word boundary, empty notifications stay silent.
 * **Settings** — defaults (`tts_enabled` off, `tts_provider` = `windows`), save +
   load round trip, every invalid value (boolean, provider name, rate, volume,
   character budget) falls back to its default with a warning.
@@ -31,7 +31,7 @@ work.
   here; removed rather than skipped, because the failure is not an exception
   Python can catch).
 
-Whole suite: `python -m pytest` — 404 tests, headless, offline, all passing.
+Whole suite: `python -m pytest` — 587 tests, headless, offline, all passing.
 
 `python -m ruff check bark_pc tests` — clean.
 
@@ -58,5 +58,6 @@ Not yet exercised on a real desktop (requires listening):
 | Tray menu *Speak notifications* toggles and survives a restart | pending |
 | A push burst is heard as the newest message only | pending |
 | `Hide preview text` says only "New notification" | pending |
+| Only the body is read: a title is never spoken | pending |
 | No voice installed → log line, toasts still delivered | pending |
 | Portable build (`BarkDesktopClient.exe`) speaks without extra DLLs | pending |

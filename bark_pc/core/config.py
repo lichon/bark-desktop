@@ -245,7 +245,6 @@ class Settings:
     ancs_adapter_name: str = ""
     tts_enabled: bool = False
     tts_provider: str = DEFAULT_TTS_PROVIDER
-    tts_include_body: bool = True
     tts_only_when_unlocked: bool = True
     tts_rate: int = 0
     tts_volume: int = 100
@@ -337,7 +336,6 @@ class Settings:
                 "hide_preview_text",
                 "autostart_enabled",
                 "tts_enabled",
-                "tts_include_body",
                 "tts_only_when_unlocked",
                 "supabase_enabled",
                 "bluetooth_enabled",

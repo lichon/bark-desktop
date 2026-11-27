@@ -1,0 +1,116 @@
+name: Probe apsd
+
+# Diagnostic, not a gate: can Apple's push daemon (apsd) be driven from a
+# GitHub-hosted macOS runner, and does `albert.apple.com` accept the result?
+# That decides whether the anonymous APNs activation premise can be verified in
+# CI at all. Every probe step is allowed to fail; the verdict lands in the job
+# summary. Run it from the Actions tab.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/apsd-probe.yml"
+      - ".github/scripts/probe_apsd.py"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: apsd on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest was macOS 26 arm64 when this was written. The pinned
+        # arm64/Intel images keep results comparable across macOS releases.
+        runner: [macos-15, macos-latest, macos-15-intel]
+    steps:
+      - name: Check out the probe script
+        uses: actions/checkout@v4
+
+      - name: Describe the runner
+        run: |
+          {
+            echo "## \`${{ matrix.runner }}\`"
+            echo '```'
+            uname -a
+            sw_vers
+            echo "hw.model: $(sysctl -n hw.model)"
+            echo "kern.osversion: $(sysctl -n kern.osversion)"
+            echo "running in a VM: $(sysctl -n kern.hv_vmm_present 2>/dev/null || echo '?')"
+            echo "arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)"
+            echo "SIP: $(csrutil status 2>&1 | tr -d '\n')"
+            ioreg -rd1 -c IOPlatformExpertDevice |
+              grep -E '"(IOPlatformSerialNumber|IOPlatformUUID|model)"' || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Inspect apsd
+        run: |
+          set -u
+          FRAMEWORK=/System/Library/PrivateFrameworks/ApplePushService.framework
+          BINARY="$FRAMEWORK/apsd"
+          {
+            echo '### apsd'
+            echo '```'
+            ls -ld "$FRAMEWORK" || echo "framework missing"
+            file "$BINARY" 2>&1 || echo "no apsd binary (dyld shared cache?)"
+            echo "codesign: $(codesign -dv "$BINARY" 2>&1 | head -6 | tr '\n' ' ')"
+            echo "launchd: $(launchctl print system/com.apple.apsd 2>&1 |
+              grep -E 'state =|path =|program =' | tr -s ' ' | tr '\n' ' ')"
+            echo "running pid: $(pgrep -x apsd | tr '\n' ' ')"
+            echo "objc class strings: $(strings -a "$BINARY" | grep -c APSCertificateProvisioner)"
+            echo "objc selector strings: $(strings -a "$BINARY" | grep -c generateClientIdentity)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Idun's mac-helper drives the real signer inside apsd (Frida agent), which
+      # is the only way to produce an activation signature Apple accepts.
+      - name: Build Idun's mac helper agent
+        id: agent
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/frida/idun "$RUNNER_TEMP/idun"
+          cd "$RUNNER_TEMP/idun/mac-helper/agent"
+          npm install --no-audit --no-fund --silent
+          npm run build --silent
+          ls -l "$RUNNER_TEMP/idun/mac-helper/idun-mac-agent.js"
+
+      - name: Set up the probe environment
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet \
+            --disable-pip-version-check frida cryptography
+          "$RUNNER_TEMP/venv/bin/python" -c \
+            "import frida; print('frida', frida.__version__)"
+
+      - name: Probe FairPlay signing and albert activation
+        id: probe
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo "agent build: ${{ steps.agent.outcome }}"
+          AGENT=()
+          if [ -f "$RUNNER_TEMP/idun/mac-helper/idun-mac-agent.js" ]; then
+            AGENT=(--agent "$RUNNER_TEMP/idun/mac-helper/idun-mac-agent.js")
+          fi
+          sudo -E "$RUNNER_TEMP/venv/bin/python" .github/scripts/probe_apsd.py \
+            --host "$RUNNER_TEMP/idun/mac-helper/idun-mac-host.py" \
+            ${AGENT[@]+"${AGENT[@]}"} 2>&1 | tee "$RUNNER_TEMP/probe.txt"
+
+      - name: Report
+        if: always()
+        env:
+          OUTCOME: ${{ steps.probe.outcome }}
+        run: |
+          {
+            echo "### identity probe: $OUTCOME"
+            echo '```'
+            cat "$RUNNER_TEMP/probe.txt" 2>/dev/null || echo "probe did not run"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

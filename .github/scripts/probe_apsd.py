@@ -1,18 +1,19 @@
-"""Drive Apple's push identity stack (apsd) on a macOS host and report whether an
-anonymous APNs activation can succeed there.
+"""Drive Apple's push identity stack (apsd) on a macOS host and show what its
+signer produces for an anonymous APNs activation.
 
-Three stages, reported independently:
+Two stages, reported independently:
 
 * static — ``ApplePushService.framework/apsd`` links into a plain host process.
-* sign — apsd's FairPlay signer produces a signature over our ``activation-info``
-  plist (needs Idun's built Frida agent, ``mac-helper/agent``).
-* albert — ``albert.apple.com`` accepts the signature and returns a device push
-  certificate.
+* sign — apsd signs our ``activation-info`` plist (needs the bundled agent,
+  ``.github/scripts/apsd-agent.js``).
 
-Needs root (Frida injection) on macOS. This answers a CI question; it is not part
-of the application, which uses the anonymous Windows activation path.
+Prints the activation-info, the apsd signature and the certificate chain.
+Never talks to Apple: submitting the signature to ``albert.apple.com`` is
+skipped on purpose. Needs root (Frida injection) on macOS. This answers a CI
+question; it is not part of the application, which uses the anonymous Windows
+activation path.
 
-    sudo python probe_apsd.py --host idun-mac-host.py [--agent idun-mac-agent.js]
+    sudo python probe_apsd.py [--agent apsd-agent.js]
 """
 
 from __future__ import annotations
@@ -25,14 +26,9 @@ import re
 import subprocess
 import sys
 import tempfile
-import urllib.parse
-import urllib.request
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-
-ALBERT = "https://albert.apple.com/deviceservices/deviceActivation?device=MacOS"
 
 # Run in the injected host, which has apsd.framework dlopen()ed. Deliberately
 # bridge-free (Frida 17 has no global `ObjC`); the ObjC surface is exercised by
@@ -64,34 +60,19 @@ def io_platform(key: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def cfnetwork_version() -> str:
-    info = "/System/Library/Frameworks/CFNetwork.framework/Resources/Info"
-    out = subprocess.run(
-        ["defaults", "read", info, "CFBundleVersion"],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.strip()
-    return out or "unknown"
-
-
 def device_identity() -> dict[str, str]:
-    """The identity Apple binds the push certificate to, as apsd reports it."""
+    """The identity apsd binds the activation to."""
     return {
         "hardware_version": sysctl("hw.model"),
         "software_version": sysctl("kern.osproductversion"),
         "software_build_id": sysctl("kern.osversion"),
         "serial_number": io_platform("IOPlatformSerialNumber"),
         "unique_device_id": io_platform("IOPlatformUUID"),
-        "push_user_agent": (
-            f"apsd (unknown version) CFNetwork/{cfnetwork_version()} "
-            f"Darwin/{sysctl('kern.osrelease')}"
-        ),
     }
 
 
 def activation_info(device: dict[str, str]) -> bytes:
-    """`activation-info` plist, shaped exactly like idun's ApnsActivation."""
+    """The `activation-info` plist apsd signs for a device activation."""
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
@@ -153,44 +134,57 @@ def _sha1_request_via_openssl(key) -> bytes:
         return request_path.read_bytes()
 
 
-def post_to_albert(
-    info: bytes, signature: bytes, chain: bytes, user_agent: str
-) -> str:
-    body = plistlib.dumps(
-        {
-            "ActivationInfoComplete": True,
-            "ActivationInfoXML": info,
-            "FairPlayCertChain": chain,
-            "FairPlaySignature": signature,
-        }
-    )
-    request = urllib.request.Request(
-        ALBERT,
-        data=urllib.parse.urlencode({"activation-info": body.decode()}).encode(),
-        headers={"User-Agent": user_agent, "Content-Type": "application/x-www-form-urlencoded"},
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return response.read().decode("utf-8", "replace")
+def describe_certificate(certificate) -> str:
+    from cryptography.hazmat.primitives import hashes
 
-
-def describe_certificate(pem: bytes) -> str:
-    from cryptography import x509
-
-    certificate = x509.load_pem_x509_certificate(pem)
     valid_from = certificate.not_valid_before_utc
     valid_to = certificate.not_valid_after_utc
     return (
         f"{certificate.subject.rfc4514_string()} "
-        f"valid {valid_from:%Y-%m-%d}..{valid_to:%Y-%m-%d}"
+        f"| issuer {certificate.issuer.rfc4514_string()} "
+        f"| serial {certificate.serial_number:x} "
+        f"| valid {valid_from:%Y-%m-%d}..{valid_to:%Y-%m-%d} "
+        f"| sha256 {certificate.fingerprint(hashes.SHA256()).hex()}"
     )
 
 
-def activation_record(page: str) -> dict[str, Any] | None:
-    match = re.search("<Protocol>(.*?)</Protocol>", page, re.S)
-    if match is None:
-        return None
-    record = plistlib.loads(match.group(1).strip().encode())
-    return record.get("device-activation", {}).get("activation-record")
+def split_der_chain(blob: bytes) -> list[bytes]:
+    """Apple hands back the certificate chain as concatenated DER SEQUENCEs."""
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < len(blob):
+        if blob[offset] != 0x30:
+            raise ValueError(f"expected a DER SEQUENCE at offset {offset}")
+        start = offset
+        offset += 1
+        length = blob[offset]
+        offset += 1
+        if length & 0x80:
+            count = length & 0x7F
+            length = int.from_bytes(blob[offset : offset + count], "big")
+            offset += count
+        offset += length
+        if offset > len(blob):
+            raise ValueError("DER SEQUENCE runs past the end of the blob")
+        chunks.append(blob[start:offset])
+    return chunks
+
+
+def print_chain(label: str, blob: bytes) -> int:
+    """Print every certificate in a DER chain; returns how many there were."""
+    from cryptography import x509
+
+    print(f"{label}: {len(blob)} bytes", flush=True)
+    try:
+        certificates = [
+            x509.load_der_x509_certificate(der) for der in split_der_chain(blob)
+        ]
+    except Exception as exc:  # noqa: BLE001 - the raw blob is the fallback
+        print(f"  not a DER chain ({exc}); base64: {base64.b64encode(blob).decode()}", flush=True)
+        return 0
+    for index, certificate in enumerate(certificates, 1):
+        print(f"  [{index}] {describe_certificate(certificate)}", flush=True)
+    return len(certificates)
 
 
 def run_stage(name: str, step: Callable[[], str]) -> bool:
@@ -202,11 +196,43 @@ def run_stage(name: str, step: Callable[[], str]) -> bool:
         return False
 
 
+# Apple's push/identity code, dlopen()ed into our own process so the FairPlay
+# signer can be driven there instead of inside the system's platform-signed
+# daemons. Same set idun's mac-helper loads.
+DAEMONS = [
+    "/System/Library/Frameworks/CFNetwork.framework/CFNetwork",
+    "/System/Library/PrivateFrameworks/ApplePushService.framework/apsd",
+    (
+        "/System/Library/PrivateFrameworks/IDS.framework/identityservicesd.app"
+        "/Contents/MacOS/identityservicesd"
+    ),
+]
+CORE_FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+
+
+def serve() -> int:
+    """Internal mode: become the injectable host, then idle on a run loop."""
+    import ctypes
+
+    for path in DAEMONS:
+        if not Path(path).exists():
+            print(f"missing {path}", file=sys.stderr, flush=True)
+            return 1
+        ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    print("ready", flush=True)
+    ctypes.CDLL(CORE_FOUNDATION).CFRunLoopRun()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", required=True, type=Path, help="idun-mac-host.py")
-    parser.add_argument("--agent", type=Path, help="built idun-mac-agent.js")
+    parser.add_argument(
+        "--serve", action="store_true", help="internal: load the daemons and idle"
+    )
+    parser.add_argument("--agent", type=Path, help="bundled apsd-agent.js")
     args = parser.parse_args()
+    if args.serve:
+        return serve()
 
     import frida
 
@@ -219,7 +245,9 @@ def main() -> int:
     )
 
     host = subprocess.Popen(
-        [sys.executable, "-I", str(args.host)], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-I", str(Path(__file__).resolve()), "--serve"],
+        stdout=subprocess.PIPE,
+        text=True,
     )
     failures = 0
     try:
@@ -250,36 +278,30 @@ def main() -> int:
             info["body"] = activation_info(device)
             agent = session.create_script(args.agent.read_text())
             agent.load()
-            result = agent.exports_sync.fairplay_sign(
+            result = agent.exports_sync.sign(
                 base64.b64encode(info["body"]).decode()
             )
             signed["signature"] = base64.b64decode(result["signature"])
             signed["chain"] = base64.b64decode(result["certificate_chain"])
+
+            print("-- activation-info (to be apsd signed) --", flush=True)
+            print(info["body"].decode("utf-8", "replace"), flush=True)
+            print("-- apsd signature --", flush=True)
+            print(f"bytes: {len(signed['signature'])}", flush=True)
+            print(f"base64: {result['signature']}", flush=True)
+            print("-- apsd certificate chain --", flush=True)
+            count = print_chain("chain", signed["chain"])
             return (
                 f"signature {len(signed['signature'])} bytes, "
-                f"chain {len(signed['chain'])} bytes"
+                f"chain {len(signed['chain'])} bytes ({count} certificates)"
             )
-
-        def albert() -> str:
-            if "signature" not in signed:
-                raise RuntimeError("no signature to submit")
-            page = post_to_albert(
-                info["body"], signed["signature"], signed["chain"], device["push_user_agent"]
-            )
-            record = activation_record(page)
-            certificate = (record or {}).get("DeviceCertificate")
-            if not certificate:
-                errors = re.findall(r"<b>(.*?)</b>", page, re.S)
-                raise RuntimeError(f"no activation record; page says {errors[:2]}")
-            return describe_certificate(certificate)
 
         failures += 0 if run_stage("static", static) else 1
         failures += 0 if run_stage("sign", sign) else 1
-        failures += 0 if run_stage("albert", albert) else 1
     finally:
         host.terminate()
 
-    print(f"verdict: {'usable' if failures == 0 else 'unusable'}", flush=True)
+    print(f"verdict: {'signed' if failures == 0 else 'failed'}", flush=True)
     return 0 if failures == 0 else 1
 
 

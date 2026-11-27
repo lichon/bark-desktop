@@ -3,10 +3,8 @@ anonymous APNs activation can succeed there.
 
 Three stages, reported independently:
 
-* static — ``ApplePushService.framework/apsd`` loads inside a plain host process
-  and exposes the ObjC surface we drive (``APSCertificateProvisioner
-  -generateClientIdentity``).
-* sign — that signer produces a FairPlay signature over our ``activation-info``
+* static — ``ApplePushService.framework/apsd`` links into a plain host process.
+* sign — apsd's FairPlay signer produces a signature over our ``activation-info``
   plist (needs Idun's built Frida agent, ``mac-helper/agent``).
 * albert — ``albert.apple.com`` accepts the signature and returns a device push
   certificate.
@@ -36,18 +34,14 @@ from typing import Any
 
 ALBERT = "https://albert.apple.com/deviceservices/deviceActivation?device=MacOS"
 
-# Run in the injected host, which has apsd.framework dlopen()ed.
+# Run in the injected host, which has apsd.framework dlopen()ed. Deliberately
+# bridge-free (Frida 17 has no global `ObjC`); the ObjC surface is exercised by
+# the agent in the `sign` stage.
 PROBE_JS = """
 rpc.exports = {
     describe() {
         const module = Process.findModuleByName("apsd");
-        const cls = ObjC.classes.APSCertificateProvisioner;
-        return JSON.stringify({
-            module: module === null ? null : module.path,
-            class_present: cls !== undefined && cls !== null,
-            selector_present: cls !== undefined && cls !== null
-                && cls["- generateClientIdentity"] !== undefined,
-        });
+        return JSON.stringify({ module: module === null ? null : module.path });
     },
 };
 """
@@ -233,17 +227,21 @@ def main() -> int:
             print("static: FAIL - host process did not load the daemon frameworks", flush=True)
             return 1
 
-        session = frida.attach(host.pid)
-        probe = session.create_script(PROBE_JS)
-        probe.load()
-        described = json.loads(probe.exports_sync.describe())
+        try:
+            session = frida.attach(host.pid)
+            probe = session.create_script(PROBE_JS)
+            probe.load()
+            described = json.loads(probe.exports_sync.describe())
+        except Exception as exc:  # noqa: BLE001 - injection failure is a result
+            print(f"static: FAIL - cannot instrument the host process: {exc}", flush=True)
+            return 1
 
         info: dict[str, bytes] = {}
         signed: dict[str, bytes] = {}
 
         def static() -> str:
-            if not (described["class_present"] and described["selector_present"]):
-                raise RuntimeError(f"apsd ObjC surface incomplete: {described}")
+            if described["module"] is None:
+                raise RuntimeError("apsd's Mach-O is not loaded in the host process")
             return f"apsd loaded from {described['module']}"
 
         def sign() -> str:

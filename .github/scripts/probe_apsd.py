@@ -196,9 +196,10 @@ def run_stage(name: str, step: Callable[[], str]) -> bool:
         return False
 
 
-# Apple's push/identity code, dlopen()ed into our own process so the FairPlay
-# signer can be driven there instead of inside the system's platform-signed
-# daemons. Same set idun's mac-helper loads.
+# Apple's push/identity code, dlopen()ed into our own process so the signer can
+# be driven there instead of inside the system's platform-signed daemons. These
+# paths are resolved by dyld, not stat()ed: on recent macOS most of them exist
+# only inside the dyld shared cache and have no file on disk.
 DAEMONS = [
     "/System/Library/Frameworks/CFNetwork.framework/CFNetwork",
     "/System/Library/PrivateFrameworks/ApplePushService.framework/apsd",
@@ -215,10 +216,11 @@ def serve() -> int:
     import ctypes
 
     for path in DAEMONS:
-        if not Path(path).exists():
-            print(f"missing {path}", file=sys.stderr, flush=True)
+        try:
+            ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+        except OSError as exc:
+            print(f"cannot load {path}: {exc}", file=sys.stderr, flush=True)
             return 1
-        ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
     print("ready", flush=True)
     ctypes.CDLL(CORE_FOUNDATION).CFRunLoopRun()
     return 0

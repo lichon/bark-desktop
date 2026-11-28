@@ -16,8 +16,6 @@ from pathlib import Path
 import anyio
 import httpx
 import pytest
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
 from pypush.apns import filters, protocol
 
 from bark_pc.core.errors import (
@@ -30,7 +28,7 @@ from bark_pc.core.errors import (
 )
 from bark_pc.core.models import PushStatus
 from bark_pc.push import pypush_client
-from bark_pc.push.pypush_client import PypushReceiver, cert_fingerprint
+from bark_pc.push.pypush_client import PypushReceiver
 
 from ..conftest import make_activation_material
 
@@ -151,27 +149,25 @@ class FakeConnection:
         self.acked.append(command)
 
 
-def real_material_pair():
-    """The (certificate, private key) pair that `apns.activate` really returns."""
-    reference = make_activation_material()
-    certificate = x509.load_pem_x509_certificate(reference.cert_pem.encode("ascii"))
-    private_key = serialization.load_pem_private_key(
-        reference.key_pem.encode("ascii"), password=None
-    )
-    return certificate, private_key
-
-
 def install(monkeypatch, *, connection=None, activate_error=None):
-    """Replace `apns.activate` / `apns.create_apns_connection` with fakes."""
+    """Replace the signing service and `apns.create_apns_connection` with fakes."""
     connection = connection or FakeConnection()
     calls: dict[str, object] = {}
 
-    async def fake_activate(**kwargs):
-        calls["activate"] = kwargs
+    async def fake_activate(signer, *, udid, serial):
+        calls["activate"] = {
+            "url": signer.url,
+            "token": signer.token,
+            "udid": udid,
+            "serial": serial,
+        }
         if activate_error is not None:
             raise activate_error
-        calls["material"] = real_material_pair()
-        return calls["material"]
+        material = make_activation_material(token=None)
+        material.udid = udid
+        material.serial = serial
+        calls["material"] = material
+        return material
 
     def fake_create_connection(certificate, private_key, **kwargs):
         calls["connection"] = {"certificate": certificate, "private_key": private_key, **kwargs}
@@ -182,7 +178,7 @@ def install(monkeypatch, *, connection=None, activate_error=None):
 
         return context()
 
-    monkeypatch.setattr(pypush_client.apns, "activate", fake_activate)
+    monkeypatch.setattr(pypush_client.ApnsDeviceSigner, "activate", fake_activate)
     monkeypatch.setattr(pypush_client.apns, "create_apns_connection", fake_create_connection)
     return calls, connection
 
@@ -191,10 +187,15 @@ def install(monkeypatch, *, connection=None, activate_error=None):
 # Activation
 # --------------------------------------------------------------------------- #
 
+APNS_DEVICE_URL = "https://project.supabase.co/functions/v1/apns-device"
+APNS_DEVICE_KEY = "device-token"
+
 
 def activate(monkeypatch, *, activate_error=None):
     calls, _ = install(monkeypatch, activate_error=activate_error)
-    receiver = PypushReceiver()
+    receiver = PypushReceiver(
+        apns_device_config=lambda: (APNS_DEVICE_URL, APNS_DEVICE_KEY)
+    )
     material = anyio.run(lambda: receiver.activate(udid=MATERIAL.udid, serial=MATERIAL.serial))
     return calls, material
 
@@ -202,22 +203,16 @@ def activate(monkeypatch, *, activate_error=None):
 def test_activate_returns_pem_material_without_a_base_token(monkeypatch):
     calls, material = activate(monkeypatch)
 
-    kwargs = dict(calls["activate"])
-    client = kwargs.pop("http_client")
-    assert isinstance(client, httpx.AsyncClient)
-    assert kwargs == {
-        "device_class": "Windows",
+    assert calls["activate"] == {
+        "url": APNS_DEVICE_URL,
+        "token": APNS_DEVICE_KEY,
         "udid": MATERIAL.udid,
         "serial": MATERIAL.serial,
     }
+    assert material is calls["material"]
     assert (material.udid, material.serial) == (MATERIAL.udid, MATERIAL.serial)
     # The base token only exists after the first ConnectAck.
     assert material.base_token_hex is None
-    certificate, private_key = calls["material"]
-    parsed = x509.load_pem_x509_certificate(material.cert_pem.encode("ascii"))
-    assert cert_fingerprint(parsed) == cert_fingerprint(certificate)
-    loaded_key = serialization.load_pem_private_key(material.key_pem.encode("ascii"), password=None)
-    assert loaded_key.private_numbers() == private_key.private_numbers()
 
 
 def test_activate_never_opens_a_courier_connection(monkeypatch):
@@ -258,12 +253,11 @@ def test_activation_error_is_the_historic_alias_for_activation_rejected():
 # --------------------------------------------------------------------------- #
 
 
-def test_activate_uses_an_instrumented_http_client(monkeypatch):
+def test_activate_uses_the_configured_apns_device(monkeypatch):
     calls, _ = activate(monkeypatch)
-    client = calls["activate"]["http_client"]
 
-    assert pypush_client._log_activation_request in client.event_hooks["request"]
-    assert pypush_client._log_activation_response in client.event_hooks["response"]
+    assert calls["activate"]["url"] == APNS_DEVICE_URL
+    assert calls["activate"]["token"] == APNS_DEVICE_KEY
 
 
 def test_activate_logs_the_attempt_and_the_success(monkeypatch, caplog):

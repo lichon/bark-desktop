@@ -32,6 +32,7 @@ SETTINGS_FILENAME = "settings.json"
 WEBHOOK_ROUTES_FILENAME = "routes.json"
 SUPABASE_SCHEME = "sb"
 MAX_SUPABASE_KEY_LENGTH = 4096
+MAX_APNS_DEVICE_KEY_LENGTH = 512
 MAX_MESSAGE_ROUTE_URL_LENGTH = 2048
 MAX_BLUETOOTH_DEVICE_ID_LENGTH = 4096
 MAX_BLUETOOTH_DEVICE_NAME_LENGTH = 155
@@ -258,6 +259,8 @@ class Settings:
     supabase_url: str = ""
     supabase_key: str = ""
     supabase_topic: str = "bark"
+    apns_device_url: str = ""
+    apns_device_key: str = ""
     message_route: str = DEFAULT_MESSAGE_ROUTE
     message_route_url: str = ""
     log_level: str = "info"
@@ -412,6 +415,8 @@ class Settings:
                 return validate_server_url(str(raw))
             if name == "supabase_url":
                 return validate_supabase_url(str(raw or ""))
+            if name == "apns_device_url":
+                return validate_apns_device_url(str(raw or ""))
             if name == "supabase_topic":
                 text = str(raw or "").strip()
                 if not text:
@@ -423,6 +428,15 @@ class Settings:
                 text = str(raw or "").strip()
                 if len(text) > MAX_SUPABASE_KEY_LENGTH:
                     raise ValueError(f"expected at most {MAX_SUPABASE_KEY_LENGTH} characters")
+                if any(character.isspace() for character in text):
+                    raise ValueError("must not contain whitespace")
+                return text
+            if name == "apns_device_key":
+                text = str(raw or "").strip()
+                if len(text) > MAX_APNS_DEVICE_KEY_LENGTH:
+                    raise ValueError(
+                        f"expected at most {MAX_APNS_DEVICE_KEY_LENGTH} characters"
+                    )
                 if any(character.isspace() for character in text):
                     raise ValueError("must not contain whitespace")
                 return text
@@ -488,6 +502,17 @@ def validate_supabase_url(raw: str) -> str:
         else:
             text = f"{SUPABASE_SCHEME}://{text}"
     return _validate_supabase_url(text)
+
+
+def validate_apns_device_url(raw: str) -> str:
+    """Canonicalize the optional `apns-device` function URL (`""` stays empty)."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    normalized = validate_server_url(text)
+    if normalized.lower().startswith(f"{SUPABASE_SCHEME}://"):
+        raise ValueError("APNs device URL must use http:// or https://")
+    return normalized
 
 
 def supabase_display_url(raw: str | None) -> str:

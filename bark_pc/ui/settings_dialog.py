@@ -20,6 +20,7 @@ from ..bluetooth import (
 )
 from ..core.config import (
     LOG_LEVELS,
+    MAX_APNS_DEVICE_KEY_LENGTH,
     MESSAGE_ROUTE_BARK,
     MESSAGE_ROUTE_BOTH,
     MESSAGE_ROUTE_LABELS,
@@ -27,6 +28,7 @@ from ..core.config import (
     MESSAGE_ROUTES,
     Settings,
     supabase_display_url,
+    validate_apns_device_url,
     validate_bark_push_url,
     validate_server_url,
     validate_supabase_url,
@@ -448,7 +450,7 @@ class SettingsDialog:
         )
         ttk.Label(
             tab,
-            text="Check the configured server, collect logs for support",
+            text="Check the server, re-activate this device, collect logs for support",
             style="Muted.TLabel",
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
@@ -462,7 +464,7 @@ class SettingsDialog:
         ttk.Button(actions, text="Export diagnostics", command=self._export).grid(
             row=0, column=1, sticky="ew", padx=(6, 0), pady=2
         )
-        ttk.Button(actions, text="Clear history", command=self._clear_history).grid(
+        ttk.Button(actions, text="Re-activate", command=self._reactivate).grid(
             row=1, column=0, sticky="ew", pady=2
         )
         ttk.Button(actions, text="Remove all data", command=self._remove_all).grid(
@@ -507,6 +509,29 @@ class SettingsDialog:
             style="Muted.TLabel",
             justify="left",
         ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        ttk.Separator(tab).grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 6))
+
+        ttk.Label(tab, text="APNs device (activation)", style="Subtitle.TLabel").grid(
+            row=12, column=0, columnspan=2, sticky="w", pady=(0, 4)
+        )
+        ttk.Label(tab, text="Service URL").grid(row=13, column=0, sticky="w")
+        self.apns_device_url_var = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.apns_device_url_var, width=34).grid(
+            row=13, column=1, sticky="ew", pady=2
+        )
+        ttk.Label(tab, text="Service key").grid(row=14, column=0, sticky="w")
+        self.apns_device_key_var = tk.StringVar()
+        ttk.Entry(
+            tab, textvariable=self.apns_device_key_var, width=34, show="*"
+        ).grid(row=14, column=1, sticky="ew", pady=2)
+        ttk.Label(
+            tab,
+            text="Needed for first-time activation and re-activation.\n"
+            "For example https://project.supabase.co/functions/v1/apns-device",
+            style="Muted.TLabel",
+            justify="left",
+        ).grid(row=15, column=0, columnspan=2, sticky="w", pady=(2, 0))
         tab.columnconfigure(1, weight=1)
 
     # -- values ------------------------------------------------------------ #
@@ -539,6 +564,8 @@ class SettingsDialog:
         self._sync_ancs_buttons()
         self.autostart_var.set(bool(settings.autostart_enabled))
         self.log_level_var.set(settings.log_level)
+        self.apns_device_url_var.set(settings.apns_device_url)
+        self.apns_device_key_var.set(settings.apns_device_key)
         self.tts_var.set(bool(settings.tts_enabled))
         self.tts_provider_var.set(
             PROVIDER_LABELS.get(settings.tts_provider, PROVIDER_LABELS[DEFAULT_TTS_PROVIDER])
@@ -596,6 +623,13 @@ class SettingsDialog:
         else:
             ancs_adapter_id = ""
             ancs_adapter_name = ""
+        apns_device_key = self.apns_device_key_var.get().strip()
+        if len(apns_device_key) > MAX_APNS_DEVICE_KEY_LENGTH:
+            raise ValueError(
+                f"The APNs device key must be at most {MAX_APNS_DEVICE_KEY_LENGTH} characters."
+            )
+        if any(character.isspace() for character in apns_device_key):
+            raise ValueError("The APNs device key must not contain whitespace.")
         server_url = validate_server_url(self.server_var.get())
         if server_url.lower().startswith("sb://"):
             raise ValueError(
@@ -632,6 +666,8 @@ class SettingsDialog:
             "silence_until": silence_until,
             "autostart_enabled": bool(self.autostart_var.get()),
             "log_level": self.log_level_var.get().strip() or self.settings.log_level,
+            "apns_device_url": validate_apns_device_url(self.apns_device_url_var.get()),
+            "apns_device_key": apns_device_key,
             "last_connected_at": self.settings.last_connected_at,
         }
 
@@ -955,6 +991,13 @@ class SettingsDialog:
                 parent=self.window,
             )
             return
+        if bool(candidate["apns_device_url"]) != bool(candidate["apns_device_key"]):
+            messagebox.showerror(
+                "Invalid setting",
+                "APNs device activation needs both the service URL and the service key.",
+                parent=self.window,
+            )
+            return
         if candidate["bluetooth_enabled"] and not candidate["bluetooth_device_id"]:
             messagebox.showerror(
                 "Bluetooth speaker",
@@ -1027,13 +1070,25 @@ class SettingsDialog:
         if path:
             self.status_label.configure(text=f"Diagnostics written to {path}")
 
-    def _clear_history(self) -> None:
+    def _reactivate(self) -> None:
         if not messagebox.askyesno(
-            "Clear history", "Delete all locally stored notifications?", parent=self.window
+            "Re-activate device",
+            "Request a new Apple device certificate and refresh this device's "
+            "push token? Existing senders keep working with the same device key.",
+            parent=self.window,
         ):
             return
-        removed = self.controller.clear_history()
-        self.status_label.configure(text=f"Removed {removed} notification(s).")
+        self.status_label.configure(text="Re-activating this device…")
+
+        def done(ok: bool, message: str) -> None:
+            self.window.after(0, lambda: self._reactivated(ok, message))
+
+        self.controller.reactivate_device_async(done)
+
+    def _reactivated(self, ok: bool, message: str) -> None:
+        self.status_label.configure(text=message)
+        if not ok:
+            messagebox.showerror("Re-activate device", message, parent=self.window)
 
     def _remove_all(self) -> None:
         if not messagebox.askyesno(

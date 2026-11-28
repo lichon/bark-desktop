@@ -22,6 +22,7 @@ from pathlib import Path
 import anyio
 
 from bark_pc.bark.server_client import BarkServerClient
+from bark_pc.core.config import SettingsStore, resolve_paths
 from bark_pc.core.errors import BarkError
 from bark_pc.core.logging import build_logger
 from bark_pc.push.identity import generate_device_ids
@@ -38,7 +39,10 @@ def _record(text: str, path: Path) -> None:
 
 
 async def run_spike(server: str, topic: str, timeout: float, report: Path) -> int:
-    receiver = PypushReceiver()
+    settings = SettingsStore(resolve_paths()).load()
+    receiver = PypushReceiver(
+        apns_device_config=lambda: (settings.apns_device_url, settings.apns_device_key)
+    )
     udid, serial = generate_device_ids()
     print(f"activating anonymous device (udid {udid})…")
     material = await receiver.activate(udid=udid, serial=serial)

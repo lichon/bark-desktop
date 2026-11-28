@@ -9,7 +9,9 @@ Target: `pypush==2.0.2` (`pypush.apns`).
 ```python
 from pypush import apns
 
-cert, key = await apns.activate(device_class="Windows", udid=... , serial=...)
+# Activation is not pypush's: the adapter asks the bark-supabase `apns-device`
+# function to sign its activation-info, then submits that to Albert itself.
+cert, key = await apns_device_signer.activate(udid=..., serial=...)
 async with apns.create_apns_connection(
     cert, key,
     token=cached_base_token_or_None,
@@ -23,7 +25,7 @@ async with apns.create_apns_connection(
 ```
 
 Notes verified from source:
-- `activate()` performs anonymous device activation against `albert.apple.com` and returns `(x509.Certificate, rsa.RSAPrivateKey)`. No Apple account, password, or 2FA exists on this path.
+- Activation is anonymous and does not use `pypush.apns.activate()`. The adapter builds the activation-info and CSR key locally, obtains an apsd signature from the configured `apns-device` function, and returns `ActivationMaterial` after Albert issues the device certificate. No Apple account, password, or 2FA exists on this path.
 - `create_apns_connection(..., token=...)` accepts a cached base token and refreshes it from `ConnectAck` when the server issues a new one.
 - The connection runs its own keepalive (30 s) and exponential-backoff reconnect; it does not surface those states to callers, so the adapter must infer and report them.
 - `notification_stream` filters by topic and (scoped) token; `ack()` must be called for each message. The adapter does **not** use `notification_stream`: its `command.token == scoped_token` check drops every real Bark push, because the Bark server holds the device's *base* token (that is what `run_setup` and `tools/spike_token.py` register). Instead the adapter installs the topic filter itself (`connection._filter([topic])`), subscribes to the broadcast stream with a topic-only filter (`message_filter`), and logs the token prefix at debug level when a message carries neither the base nor the scoped token.

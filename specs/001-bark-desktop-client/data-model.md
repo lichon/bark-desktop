@@ -17,7 +17,7 @@ The anonymously activated emulated Apple device.
 | `id` | integer | Always `1` |
 | `udid` | text | Generated UUID v4 at activation; stable across restarts |
 | `serial` | text | Generated at activation; stable |
-| `device_class` | text | Fixed `Windows` for the activation request |
+| `device_class` | text | Fixed `MacOS`; defaults mirror the `macos-15` signing runner |
 | `cert_fingerprint` | text | SHA-256 of the DER certificate; identifies the cached secret blob |
 | `state` | text | `absent` \| `activating` \| `active` \| `invalid` |
 | `activated_at` | integer | When activation succeeded |

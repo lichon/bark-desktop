@@ -70,6 +70,14 @@ CONNECTION_STATUS_LABELS: dict[ConnectionStatus, str] = {
     ConnectionStatus.SILENCED: "Silenced",
 }
 
+PUSH_STATUS_LABELS: dict[PushStatus, str] = {
+    PushStatus.CONNECTING: "Connecting…",
+    PushStatus.ACTIVE: "Connected",
+    PushStatus.DEGRADED: "Reconnecting…",
+    PushStatus.INVALID: "Action required",
+    PushStatus.STOPPED: "Stopped",
+}
+
 
 def truncate_text(text: str, limit: int = TOAST_MAX_CHARS) -> str:
     """Truncate *text* to *limit* characters, appending an ellipsis when cut."""
@@ -96,7 +104,7 @@ class DeviceIdentity:
     id: int = 1
     udid: str = ""
     serial: str = ""
-    device_class: str = "Windows"
+    device_class: str = "MacOS"
     cert_fingerprint: str | None = None
     state: DeviceState = DeviceState.ABSENT
     activated_at: int | None = None

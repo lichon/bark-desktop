@@ -12,12 +12,9 @@ import logging
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
-from urllib.parse import urlsplit
 
 from ..core.models import (
     BODY_MAX_STORED_BYTES,
-    CONNECTION_STATUS_LABELS,
-    ConnectionStatus,
     ImageState,
     Notification,
 )
@@ -118,8 +115,12 @@ class HistoryWindow:
         ttk.Button(toolbar, text="Clear all", command=self._clear_all).pack(
             side="left", padx=(6, 0)
         )
-        self.status_label = ttk.Label(toolbar, text="", style="Muted.TLabel")
-        self.status_label.pack(side="right")
+        status_box = ttk.Frame(toolbar)
+        status_box.pack(side="right")
+        self.transport_status_label = ttk.Label(
+            status_box, text="", style="Muted.TLabel", justify="right"
+        )
+        self.transport_status_label.pack(anchor="e")
 
         body = ttk.Frame(self.window)
         body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -294,11 +295,11 @@ class HistoryWindow:
         self._update_status()
 
     def _update_status(self) -> None:
-        text = self._status_text()
+        text = self._transport_status_text()
         notice = self._notice()
         if notice:
             text = f"{text} · {notice}" if text else notice
-        self.status_label.configure(text=text)
+        self.transport_status_label.configure(text=text)
         self._update_send_state()
 
     def _open_settings(self) -> None:
@@ -321,50 +322,27 @@ class HistoryWindow:
         except Exception:  # pragma: no cover - UI callback must not crash
             logger.exception("open routing failed")
 
-    def _status_text(self) -> str:
-        """Server host plus connection state from the controller.
+    def _transport_status_text(self) -> str:
+        """One line per transport: APNs courier and the Supabase Realtime room."""
+        lines = [
+            self._callback_text("apns_status"),
+            self._callback_text("supabase_status"),
+        ]
+        return "\n".join(line for line in lines if line)
 
-        The host keeps the label unambiguous when several Bark servers are in
-        use; it is omitted while no link is stored (the state alone is shown).
-        """
-        label = ""
-        getter = self.callbacks.get("connection_status")
-        if getter is not None:
-            try:
-                text = getter()
-                if text:
-                    label = str(text)
-            except Exception:  # pragma: no cover - callback isolation
-                logger.exception("connection_status callback failed")
-        if not label:
-            label = CONNECTION_STATUS_LABELS[ConnectionStatus.STARTING]
-        host = self._server_host()
-        return f"{host} · {label}" if host else label
-
-    def _server_host(self) -> str:
-        """Bark server host (`host:port`) from the stored link, or empty."""
-        try:
-            link = self.db.get_link()
-        except Exception:  # pragma: no cover - repository isolation
-            logger.exception("reading the link failed")
-            return ""
-        if link is None or not link.server_url:
-            return ""
-        try:
-            return urlsplit(link.server_url).netloc or link.server_url
-        except ValueError:  # pragma: no cover - defensive
-            return link.server_url
-
-    def _notice(self) -> str:
-        """Optional trailing hint from the controller (e.g. failed toasts)."""
-        getter = self.callbacks.get("toast_notice")
+    def _callback_text(self, name: str) -> str:
+        getter = self.callbacks.get(name)
         if getter is None:
             return ""
         try:
-            return getter() or ""
+            return str(getter() or "")
         except Exception:  # pragma: no cover - callback isolation
-            logger.exception("toast_notice callback failed")
+            logger.exception("%s callback failed", name)
             return ""
+
+    def _notice(self) -> str:
+        """Optional trailing hint from the controller (e.g. failed toasts)."""
+        return self._callback_text("toast_notice")
 
     # -- compose bar ------------------------------------------------------- #
     def _can_send(self) -> bool:

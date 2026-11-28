@@ -6,7 +6,9 @@ native desktop notifications, with a local searchable history, image previews,
 and recall (delete) support.
 
 * **No Apple account is used.** The app performs an anonymous Apple device
-  activation and receives pushes the same way the Bark iOS app does.
+  activation (signed by the `apns-device` service from the companion
+  `bark-supabase` project) and receives pushes the same way the Bark iOS app
+  does.
 * **Your pushes keep working unchanged.** Existing senders (the Bark iPhone app,
   `curl`, scripts, shortcuts) keep using the same server and device key.
 * **Portable by default.** Unpack a folder and run the app; no installer and no
@@ -560,10 +562,11 @@ folder next to the `.app` when you want data to travel with the bundle.
   `settings.json`) are credentials: anyone with them can send to your link or
   room. Treat them like the push URL.
 * Notification content stays on this machine. The only outbound connections are
-  Apple's activation service, Apple's courier, the Bark server you chose, the
-  Supabase project and its Realtime WebSocket when the optional room is enabled,
-  the Bark URL configured for self messages, the webhook URLs you route
-  messages to, and the image URLs contained in your own pushes.
+  Apple's activation service, Apple's courier, the configured `apns-device`
+  signing function, the Bark server you chose, the Supabase project and its
+  Realtime WebSocket when the optional room is enabled, the Bark URL configured
+  for self messages, the webhook URLs you route messages to, and the image URLs
+  contained in your own pushes.
 * Webhook rules (`routes.json`) may contain an `Authorization` header or a
   token in the webhook URL. Treat that file as a credential too.
 * The activation identity (`identity.bin`) is encrypted with the platform's
@@ -577,6 +580,10 @@ folder next to the `.app` when you want data to travel with the bundle.
   `warning` or `error`). `debug` also records every outbound HTTP request and
   response, including the `httpx`/`httpcore` details of libraries that create
   their own clients.
+* Device activation and re-activation need an `apns-device` endpoint: set its
+  URL and bearer key in *Settings → Maintenance → APNs device*. The service URL
+  is the deployed Supabase function, for example
+  `https://<ref>.supabase.co/functions/v1/apns-device`.
 * *Settings → Remove all data* deletes the identity, history, images, logs,
   settings, webhook rules, the autostart entry and the `barkpc:` registration.
 
@@ -590,6 +597,8 @@ equivalent checks as their backends land.
 | Registration succeeds but pushes never arrive | The server uses a different APNs topic, or the push token is not accepted | Check `push_topic` in Settings against the server's hardcoded topic (`me.fin.bark` by default). Server logs show the APNs reason. With log level `debug`, a delivered push logs `stream: delivering message (N bytes)` followed by `stored notification <id>`; a message that carries neither the base nor the scoped token also logs `stream: message on <topic> carries an unexpected token`. |
 | Toast API succeeds but nothing appears | Notifications disabled for the app, Focus Assist on, or an unpackaged-toast quirk | Windows Settings → System → Notifications; try *Test notification*. A refused toast now logs `toast failed: 0x…: <cause>` and is repeated in the tray tooltip and the history toolbar (`toasts blocked`). `0x803E0114` = notifications are off for this user (`HKCU\Software\Microsoft\Windows\CurrentVersion\PushNotifications\ToastEnabled` is `0`); `0x803E0207` = Do Not Disturb dropped it; `0x80070490` = no app registration (AUMID) for the toast source. |
 | Every activation fails with an Apple error | Activation endpoint blocked, changed, or rate-limited | Check the log; wait a minute before retrying. |
+| Activation says the signing service is not configured | `apns-device` URL or key is missing | Set both values in *Settings → Maintenance → APNs device*, then retry. |
+| Activation fails with `apns-device signing failed` | The signing workflow rejected the request or ran out of time | Check the service URL/key and the workflow run linked in the log; retry after a minute. |
 | Tray icon disappears after restarting Explorer | Shell notification-area reset | The app re-adds it within a minute. |
 | Images never load | Host blocks non-browser user agents, TLS failure, or a non-image content type | The log records the URL hash and the reason; try a different host. |
 | Notifications are not read aloud | Speech is off, the screen is locked, the system has no voice installed, or the speech API is unavailable | Enable *Settings → Text-to-speech → Speak notifications aloud* and press *Test voice*. While the screen is locked the app stays silent by design (see *Only read aloud while the screen is unlocked*). The log records `text-to-speech unavailable (… provider): …`; install a voice in the OS speech settings. |

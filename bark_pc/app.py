@@ -52,7 +52,7 @@ from .core.db import Database, RecentPayloadFilter
 from .core.errors import BarkError
 from .core.logging import build_logger, export_diagnostics
 from .core.models import (
-    CONNECTION_STATUS_LABELS,
+    PUSH_STATUS_LABELS,
     ConnectionStatus,
     ImageState,
     LinkState,
@@ -71,7 +71,7 @@ from .platform.windows.uri_scheme import WindowsUriHandler, parse_barkpc_uri
 from .push import supabase_realtime
 from .push.identity import IdentityManager
 from .push.ingest import Ingestor
-from .push.pypush_client import PypushReceiver
+from .push.pypush_client import COURIER, PypushReceiver
 from .push.routing import RouteStore, WebhookDispatcher
 from .push.supervisor import PushSupervisor
 from .tts import TTS_PREVIEW_TEXT, build_tts_provider, should_speak, speech_text
@@ -119,7 +119,7 @@ class BarkApp:
             store=self.secret_store,
             secret_path=self.paths.identity_path,
             db=self.db,
-            receiver=PypushReceiver(),
+            receiver=self._push_receiver(),
         )
         self.links = LinkManager(self.db, push_topic=self.settings.push_topic)
         self._migrate_legacy_supabase_link()
@@ -374,16 +374,22 @@ class BarkApp:
         if self.history_window is not None:
             self.history_window.refresh_status()
 
-    def _connection_status_text(self) -> str:
-        """Human label for the history toolbar."""
-        if self.is_silenced():
-            status = ConnectionStatus.SILENCED
-        else:
-            try:
-                status = ConnectionStatus(getattr(self.tray, "status", None))
-            except (TypeError, ValueError):
-                status = ConnectionStatus.STARTING
-        return CONNECTION_STATUS_LABELS.get(status, status.value)
+    def _transport_status_label(self, role: str) -> str:
+        status = self._transport_status.get(role)
+        if status is None:
+            return "Starting"
+        return PUSH_STATUS_LABELS.get(status, status.value)
+
+    def _apns_status_text(self) -> str:
+        """APNs courier address plus the Bark receiver state."""
+        return f"APNs {COURIER} · {self._transport_status_label('bark')}"
+
+    def _supabase_status_text(self) -> str:
+        """Realtime room name plus the Supabase receiver state."""
+        if not self.settings.supabase_enabled:
+            return "Supabase room off"
+        room = (self.settings.supabase_topic or "bark").strip() or "bark"
+        return f"Supabase room {room} · {self._transport_status_label('supabase')}"
 
     def _set_status(self, status: ConnectionStatus, reason: str | None = None) -> None:
         if status != ConnectionStatus.SILENCED and self.is_silenced():
@@ -470,6 +476,13 @@ class BarkApp:
             self._on_ui(lambda: self.open_setup())
             return None
 
+    def _apns_device_config(self) -> tuple[str, str]:
+        """Current `apns-device` URL and key; activation reads it lazily."""
+        return self.settings.apns_device_url, self.settings.apns_device_key
+
+    def _push_receiver(self) -> PypushReceiver:
+        return PypushReceiver(apns_device_config=self._apns_device_config)
+
     def _supabase_config(self) -> tuple[str, str, str] | None:
         """`(server_url, auth_key, room)` for the optional Realtime transport."""
         if not self.settings.supabase_enabled:
@@ -495,7 +508,7 @@ class BarkApp:
             return
         topic = link.push_topic or self.settings.push_topic or DEFAULT_PUSH_TOPIC
         self.supervisor = PushSupervisor(
-            PypushReceiver(),
+            self._push_receiver(),
             material_getter=self._material,
             topic=topic,
             on_message=lambda raw: self._on_payload(raw, "bark"),
@@ -548,6 +561,38 @@ class BarkApp:
         if self.supabase_supervisor is not None:
             self.supabase_supervisor.stop(timeout=timeout)
             self.supabase_supervisor = None
+
+    def reactivate_device_async(self, done) -> None:
+        """Request a new certificate and token without blocking the Tk thread."""
+
+        def worker() -> None:
+            try:
+                self._reactivate_device()
+            except Exception as exc:  # surfaced in the settings dialog
+                message = f"Re-activation failed: {exc}"
+                self.log.warning("re-activation failed: %s", exc)
+                done(False, message)
+            else:
+                done(True, "Device re-activated and re-registered.")
+
+        threading.Thread(target=worker, name="bark-reactivate", daemon=True).start()
+
+    def _reactivate_device(self) -> None:
+        link = self.db.get_link()
+        if link is None or link.is_supabase or not link.device_key:
+            raise BarkError("No usable Bark link yet. Complete setup first.")
+        material = anyio.run(lambda: self.identity.activate())
+        token = anyio.run(lambda: self.identity.fetch_base_token(material))
+        self.links.register(
+            link.server_url,
+            token,
+            device_key=link.device_key,
+            push_topic=link.push_topic,
+        )
+        self.stop_receiver()
+        self.start_receiver()
+        self._on_ui(lambda: self._set_status(ConnectionStatus.CONNECTING))
+        self.log.info("device re-activated and re-registered with %s", link.server_url)
 
     async def _reactivate_identity(self) -> None:
         material = await self.identity.activate()
@@ -1200,7 +1245,8 @@ class BarkApp:
                     "on_open_settings": self.open_settings,
                     "on_open_routing": self.open_routing,
                     "on_clear_all": self.clear_history,
-                    "connection_status": self._connection_status_text,
+                    "apns_status": self._apns_status_text,
+                    "supabase_status": self._supabase_status_text,
                     "can_send_message": self.can_send_message,
                     "on_send_message": self.send_message,
                     "on_copy_text": self.copy_text,

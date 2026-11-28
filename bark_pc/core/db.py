@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS device_identity (
     id               INTEGER PRIMARY KEY CHECK (id = 1),
     udid             TEXT NOT NULL DEFAULT '',
     serial           TEXT NOT NULL DEFAULT '',
-    device_class     TEXT NOT NULL DEFAULT 'Windows',
+    device_class     TEXT NOT NULL DEFAULT 'MacOS',
     cert_fingerprint TEXT,
     state            TEXT NOT NULL DEFAULT 'absent'
                      CHECK (state IN ('absent','activating','active','invalid')),
@@ -440,7 +440,7 @@ class Database:
             id=row["id"],
             udid=row["udid"] or "",
             serial=row["serial"] or "",
-            device_class=row["device_class"] or "Windows",
+            device_class=row["device_class"] or "MacOS",
             cert_fingerprint=row["cert_fingerprint"],
             state=models.DeviceState(row["state"]),
             activated_at=row["activated_at"],

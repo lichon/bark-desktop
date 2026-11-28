@@ -19,6 +19,7 @@ from cryptography import x509
 
 from ..core.errors import ActivationRejected, IdentityMissing, IdentityUnreadable
 from ..core.models import ActivationMaterial, DeviceIdentity, DeviceState
+from .apns_device import DEFAULT_SERIAL
 from .pypush_client import ActivationError, PypushReceiver, cert_fingerprint
 
 logger = logging.getLogger("bark_pc.identity")
@@ -28,7 +29,7 @@ ACTIVATION_RATE_LIMIT_S = 60.0
 
 def generate_device_ids() -> tuple[str, str]:
     """UDID and serial are generated once and reused for the identity's life."""
-    return str(uuid.uuid4()), "WindowSerial"
+    return str(uuid.uuid4()), DEFAULT_SERIAL
 
 
 def fingerprint_of_pem(cert_pem: str) -> str:
@@ -64,7 +65,7 @@ class IdentityManager:
         identity = meta or DeviceIdentity()
         identity.udid = udid
         identity.serial = serial
-        identity.device_class = "Windows"
+        identity.device_class = "MacOS"
         if identity.state == DeviceState.ABSENT:
             identity.state = DeviceState.ABSENT
         self.db.upsert_identity_meta(identity)
@@ -78,6 +79,7 @@ class IdentityManager:
         identity = self.db.get_identity_meta() or DeviceIdentity()
         identity.udid = material.udid or identity.udid
         identity.serial = material.serial or identity.serial
+        identity.device_class = "MacOS"
         identity.cert_fingerprint = fingerprint
         identity.state = DeviceState.ACTIVE
         identity.activated_at = identity.activated_at or int(time.time() * 1000)

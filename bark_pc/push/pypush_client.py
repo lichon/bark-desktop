@@ -4,16 +4,16 @@
 adapter (see `contracts/pypush-adapter.md`) means the rest of the application can
 survive an upstream API change or a library swap.
 
-Activation is anonymous: `apns.activate()` posts to Apple's device-activation
-endpoint and returns a device certificate + RSA key.  No Apple account, password
-or 2FA is involved.
+Activation is anonymous and two-stage: the desktop builds the activation-info
+and its CSR key, `apns-device` signs the plist on a macOS runner, and the signed
+plist is submitted to Apple's device-activation endpoint.  No Apple account,
+password or 2FA is involved.  `pypush` is still the courier transport.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -22,7 +22,6 @@ import anyio
 import httpx
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 from pypush import apns
 from pypush.apns import filters, protocol
 
@@ -34,100 +33,26 @@ from ..core.errors import (
     StreamLost,
     TokenRejected,
 )
-from ..core.http_debug import alog_request, alog_response
 from ..core.models import ActivationMaterial, PushStatus
+from . import apns_device as _apns_device
+from .apns_device import ApnsDeviceSigner, certificate_fingerprint
+
+# Re-exported for callers and tests that used the old activation hooks.
+_log_activation_request = _apns_device._log_activation_request
+_log_activation_response = _apns_device._log_activation_response
+_activation_event_hooks = _apns_device._activation_event_hooks
 
 logger = logging.getLogger("bark_pc.pypush")
 
 COURIER = "1-courier.push.apple.com"
 DEFAULT_TOPIC = "me.fin.bark"
 
-# Apple answers activation with an XML plist on success and with an HTML
-# wizard page containing `<b>reason</b>` on failure.  Only the reason is logged.
-_BOLD_TEXT = re.compile(r"<b>(.*?)</b>", re.DOTALL)
-# Activation answers wrap a multi-line plist in <Protocol>.  A rejection ships
-# the same wrapper around an empty <dict/> plus a `<b>reason</b>` on the page.
-_PROTOCOL_BLOCK = re.compile(r"<Protocol>(.*)</Protocol>", re.DOTALL)
-_WHITESPACE = re.compile(r"\s+")
-
-
-def _is_empty_protocol(body: str) -> bool:
-    """True when Apple replies with a `<Protocol>` block but no activation record."""
-    return bool(_PROTOCOL_BLOCK.search(body)) and "device-activation" not in body
-
-
-def _summarize(text: str, limit: int = 400) -> str:
-    """Collapse an upstream body to one bounded, log-safe line."""
-    collapsed = _WHITESPACE.sub(" ", text or "").strip()
-    if len(collapsed) > limit:
-        return collapsed[:limit] + "…"
-    return collapsed
-
-
-def _activation_event_hooks() -> dict[str, list]:
-    """Generic HTTP debug hooks plus the activation-specific analysis."""
-    return {
-        "request": [alog_request, _log_activation_request],
-        "response": [alog_response, _log_activation_response],
-    }
-
-
-async def _log_activation_request(request: httpx.Request) -> None:
-    logger.debug(
-        "activation request: POST %s://%s%s (device=%s, %d bytes)",
-        request.url.scheme,
-        request.url.host,
-        request.url.path,
-        request.url.params.get("device", "?"),
-        len(request.content),
-    )
-
-
-async def _log_activation_response(response: httpx.Response) -> None:
-    # `response` hooks run before the body is read, so pull it into memory here
-    # (httpx caches it; `apns.activate` can still use `response.text`).
-    try:
-        body = (await response.aread()).decode("utf-8", errors="replace")
-    except Exception as exc:  # pragma: no cover - body already consumed elsewhere
-        logger.debug("activation response body unavailable: %s", exc)
-        return
-    logger.debug("activation response: HTTP %s (%d bytes)", response.status_code, len(body))
-    reason = _BOLD_TEXT.search(body)
-    if response.status_code >= 400 or reason is not None or _is_empty_protocol(body):
-        logger.warning(
-            "Apple rejected the activation request (HTTP %s): %s",
-            response.status_code,
-            _summarize(reason.group(1)) if reason else _summarize(body),
-        )
-        if _is_empty_protocol(body):
-            logger.warning(
-                "Apple returned an activation plist without a device certificate "
-                '(an empty <dict/>, usually "there is a problem with your device")'
-            )
-    logger.debug("activation response body: %s", _summarize(body, 2000))
-
-
 class ActivationError(ActivationRejected):
     """Backwards-compatible alias used by tools and older call sites."""
 
 
 def cert_fingerprint(certificate: x509.Certificate) -> str:
-    import hashlib
-
-    der = certificate.public_bytes(serialization.Encoding.DER)
-    return hashlib.sha256(der).hexdigest()
-
-
-def _cert_to_pem(certificate: x509.Certificate) -> str:
-    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
-
-
-def _key_to_pem(private_key: rsa.RSAPrivateKey) -> str:
-    return private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("ascii")
+    return certificate_fingerprint(certificate)
 
 
 def _token_prefix(token: bytes | None, length: int = 8) -> str:
@@ -194,40 +119,51 @@ def _load_material(material: ActivationMaterial):
 class PypushReceiver:
     """`PushReceiver` implementation backed by `pypush.apns`."""
 
-    def __init__(self, *, courier: str = COURIER):
+    def __init__(
+        self,
+        *,
+        courier: str = COURIER,
+        apns_device_config: Callable[[], tuple[str, str]] | None = None,
+    ):
         self.courier = courier
+        self._apns_device_config = apns_device_config or (lambda: ("", ""))
         self._stop_event: anyio.Event | None = None
         self._stopped = False
 
     # -- activation -------------------------------------------------------- #
     async def activate(self, *, udid: str, serial: str) -> ActivationMaterial:
-        logger.info(
-            "activation: requesting anonymous device certificate (udid=%s, serial=%s)",
-            udid,
-            serial,
-        )
+        url, token = self._apns_device_config()
+        signer = ApnsDeviceSigner(url=url, token=token)
         started = time.perf_counter()
 
         def elapsed() -> float:
             return time.perf_counter() - started
 
+        logger.info(
+            "activation: requesting anonymous device certificate (udid=%s, serial=%s)",
+            udid,
+            serial,
+        )
         try:
-            async with httpx.AsyncClient(
-                event_hooks=_activation_event_hooks(),
-            ) as client:
-                certificate, private_key = await apns.activate(
-                    http_client=client,
-                    device_class="Windows",
-                    udid=udid,
-                    serial=serial,
-                )
+            material = await signer.activate(udid=udid, serial=serial)
+            fingerprint = cert_fingerprint(
+                x509.load_pem_x509_certificate(material.cert_pem.encode("ascii"))
+            )
+            logger.info(
+                "activation: succeeded in %.1fs (cert fingerprint %s…)",
+                elapsed(),
+                fingerprint[:8],
+            )
+            return material
+        except (ActivationRejected, ActivationUnavailable):
+            raise
         except httpx.TimeoutException as exc:
             logger.warning("activation: timed out after %.1fs (%s)", elapsed(), exc)
             raise ActivationUnavailable(f"activation timed out: {exc}") from exc
         except httpx.TransportError as exc:
             logger.warning("activation: transport error after %.1fs (%s)", elapsed(), exc)
             raise ActivationUnavailable(f"activation transport error: {exc}") from exc
-        except Exception as exc:  # pypush raises plain Exception on Apple errors
+        except Exception as exc:  # noqa: BLE001 - activation errors are mapped for the UI
             message = str(exc)
             if "Albert" in message or "activation" in message.lower():
                 logger.warning("activation: rejected after %.1fs (%s)", elapsed(), message)
@@ -236,20 +172,6 @@ class PypushReceiver:
             logger.warning("activation: failed after %.1fs (%s)", elapsed(), message)
             logger.debug("activation failure details", exc_info=True)
             raise ActivationUnavailable(message) from exc
-
-        material = ActivationMaterial(
-            cert_pem=_cert_to_pem(certificate),
-            key_pem=_key_to_pem(private_key),
-            base_token_hex=None,
-            udid=udid,
-            serial=serial,
-        )
-        logger.info(
-            "activation: succeeded in %.1fs (cert fingerprint %s…)",
-            elapsed(),
-            cert_fingerprint(certificate)[:8],
-        )
-        return material
 
     # -- connection helpers ------------------------------------------------ #
     @asynccontextmanager
